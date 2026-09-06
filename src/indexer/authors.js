@@ -67,23 +67,25 @@ export function mergeAuthors() {
 	// выкладывали, остаётся тем же аккаунтом, а вот подпись, встречающаяся
 	// только у мёртвого пака, без них потеряла бы своего человека
 	const rows = db.prepare(`
-		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account, COUNT(*) AS packs
+		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account, COUNT(*) AS packs,
+			SUM(CASE WHEN p.status = 'ok' THEN 1 ELSE 0 END) AS live
 		FROM pack_authors a JOIN packages p ON p.id = a.package_id
 		GROUP BY a.author_key, a.author, p.vk_author_url
 	`).all();
 
-	/** Подпись -> {написания, аккаунты, сколько паков}. */
+	/** Подпись -> {написания, из них живые, аккаунты, сколько паков}. */
 	const signatures = new Map();
 
 	for (const row of rows) {
 		let item = signatures.get(row.key);
 
 		if (!item) {
-			item = { key: row.key, spellings: new Map(), accounts: new Set(), packs: 0 };
+			item = { key: row.key, spellings: new Map(), live: new Map(), accounts: new Set(), packs: 0 };
 			signatures.set(row.key, item);
 		}
 
 		item.spellings.set(row.name, (item.spellings.get(row.name) ?? 0) + row.packs);
+		item.live.set(row.name, (item.live.get(row.name) ?? 0) + (row.live ?? 0));
 		item.packs += row.packs;
 
 		const account = (row.account ?? '').trim();
@@ -150,6 +152,17 @@ export function mergeAuthors() {
 	reset.run();
 	unmark.run();
 
+	// Главное написание — каждой подписи своё, ещё до всякого слияния.
+	//
+	// Раньше этого прохода не было вовсе: canon_name у неслитой подписи
+	// оставался тем, что написано в поле <author> вот этого одного пака, —
+	// то есть у одного и того же человека он был разным от пака к паку.
+	// Теперь он один на подпись и выбран по счёту паков (см. mainSpelling),
+	// и на карточке, на странице автора и в топе стоит одно и то же имя.
+	for (const item of signatures.values()) {
+		write.run(item.key, mainSpelling(item), item.key);
+	}
+
 	let merged = 0;
 	let people = 0;
 	let marked = 0;
@@ -202,33 +215,54 @@ export function mergeAuthors() {
 		}
 
 		// Главное написание — то, которым подписано больше паков
-		const best = own
-			.flatMap(item => [...item.spellings.entries()].map(([name, packs]) => ({ name, packs })))
-			.sort((a, b) => b.packs - a.packs || a.name.length - b.name.length || a.name.localeCompare(b.name))[0];
+		const best = bestSpelling(own.flatMap(item => spellingCounts(item)));
 
 		const canonKey = own
 			.slice()
 			.sort((a, b) => b.packs - a.packs || a.key.length - b.key.length || a.key.localeCompare(b.key))[0].key;
 
 		for (const item of own) {
-			write.run(canonKey, best.name, item.key);
+			write.run(canonKey, best, item.key);
 		}
 
 		people++;
 		merged += own.length - 1;
 
-		say('authors', `${best.name}: ${own.map(item => item.key).join(', ')}`);
+		say('authors', `${best}: ${own.map(item => item.key).join(', ')}`);
 	}
 
 	say('authors', `подписей ${signatures.size}; сведено ${merged} лишних к ${people} авторам `
 		+ `(паки выложены с одной страницы ВК); опечаток ${typos}; с номером страницы ${marked}`);
 }
 
-/** Написание, которым подписано больше паков: то имя, под которым человека знают. */
-function mainSpelling(item) {
-	return [...item.spellings.entries()]
-		.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))[0][0];
+/** Написания подписи с двумя счётчиками: сколько паков всего и сколько живых. */
+const spellingCounts = item => [...item.spellings.entries()]
+	.map(([name, all]) => ({ name, all, live: item.live.get(name) ?? 0 }));
+
+/**
+ * Написание, под которым человека знают: то, которым подписано больше паков.
+ *
+ * Считаются сперва живые паки, и только если живых нет ни одного — все подряд.
+ * Разница не умозрительная: у «пети» три пака подписаны «петя» и три
+ * «baziltred», но все три первых давно мертвы, а в библиотеке стоят вторые —
+ * и звать человека именем, которого на сайте нет ни на одной карточке, значит
+ * уводить с карточки «baziltred» на страницу «петя».
+ *
+ * При равенстве — то, что короче и раньше по алфавиту, чтобы выбор не плясал
+ * от запуска к запуску.
+ */
+function bestSpelling(counts) {
+	const live = counts.filter(item => item.live > 0);
+	const pool = live.length > 0
+		? live.map(item => ({ name: item.name, packs: item.live }))
+		: counts.map(item => ({ name: item.name, packs: item.all }));
+
+	return pool
+		.sort((a, b) => b.packs - a.packs || a.name.length - b.name.length || a.name.localeCompare(b.name))[0]
+		.name;
 }
+
+const mainSpelling = item => bestSpelling(spellingCounts(item));
 
 /**
  * Короче этого подписи на опечатки не проверяются вовсе.
