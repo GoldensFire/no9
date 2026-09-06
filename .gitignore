@@ -71,6 +71,7 @@ src/server/
 src/meta/
 
 # Общее с сайтом, но обходу ненужное
+src/bundles.js
 src/auth.js
 src/fuzzy.js
 src/i18n.js

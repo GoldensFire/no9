@@ -50,6 +50,7 @@ import { spawnSync } from 'node:child_process';
 import { dataPath, dbOnly, local, root, toShelf, whole } from './deploy/options.js';
 import { checkAuth, run, writeDevVars } from './deploy/wrangler.js';
 import { pour } from './deploy/d1.js';
+import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
@@ -173,6 +174,19 @@ async function main() {
 	// Заливка паков их не касается вовсе — иначе выкладка стирала бы всё,
 	// что накопили посетители (см. cf/schema.sql).
 	console.log('\n───── Таблицы посетителей ─────');
+
+	// Сперва — то, чего схема живущей базе донести не может: у таблицы, которая
+	// уже есть, «CREATE TABLE IF NOT EXISTS» новых колонок не заводит
+	// (см. scripts/deploy/columns.js).
+	//
+	// Порядок здесь не вкусовщина. В схеме на новую колонку стоит указатель,
+	// а указатель по колонке, которой в таблице нет, — это отказ и сорванная
+	// выкладка: «no such column: parent_id». Схема, стало быть, вправе
+	// рассчитывать, что колонки уже на месте, — и досыл обязан идти до неё,
+	// а не после. Пустой базе это ничем не мешает: таблицы там ещё нет вовсе,
+	// досылать нечего, и заводит её следом схема — сразу нужного вида.
+	await addMissingColumns();
+
 	await pour('cf/schema.sql');
 
 	// Плашку зажигаем только теперь, а не первым делом: строка её ложится

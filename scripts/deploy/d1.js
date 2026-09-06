@@ -13,7 +13,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { local, root } from './options.js';
+import { spawnSync } from 'node:child_process';
+import { DB_NAME, local, root } from './options.js';
 import { BUSY_WAITS, CLOUDFLARE_ENV, execute, IMPORT_BUSY, sleep } from './wrangler.js';
 
 /** Куда стучаться напрямую, без wrangler. */
@@ -144,6 +145,72 @@ export async function readDatabase(sql) {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Спросить базу и получить строки. Отказ — исключением: спрашивают отсюда те,
+ * кому без ответа делать нечего (перестройка таблицы входов, досыл недостающих
+ * колонок), и молча идти дальше им нельзя.
+ *
+ * От readDatabase выше отличается двумя вещами, и обе существенные: тот молчит
+ * про отказ и не умеет спрашивать иначе как через REST.
+ *
+ * Через wrangler спрашивается в тех же двух случаях, что и заливается
+ * (см. pour ниже): местная копия — потому что REST до неё не достаёт вовсе, она
+ * лежит файлом рядом с проектом; настоящая база без постоянного ключа — потому
+ * что REST'у нечем доказать, что он — это мы, а у wrangler для этого есть свой
+ * часовой пропуск.
+ */
+export async function askRows(sql) {
+	if (local || !CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN) {
+		// Запрос уезжает файлом, а не строкой в командной строке: перенос строки
+		// и кавычки в нём есть всегда, а на Windows команда собирается оболочкой,
+		// и до wrangler доезжает не то, что отправляли
+		const file = path.join(root, '.wrangler', 'ask.sql');
+
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, sql, 'utf8');
+
+		const where = local ? '--local' : '--remote';
+
+		const result = spawnSync('npx', ['wrangler', 'd1', 'execute', DB_NAME, where, `--file=${file}`, '--json', '-y'], {
+			cwd: root,
+			encoding: 'utf8',
+			shell: process.platform === 'win32',
+		});
+
+		fs.rmSync(file, { force: true });
+
+		const out = result.stdout ?? '';
+		const start = out.indexOf('[');
+
+		if (start < 0) {
+			throw new Error(out.trim() || result.stderr?.trim() || 'wrangler ничего не ответил');
+		}
+
+		// Wrangler печатает перед ответом свою шапку, а сам ответ — массивом:
+		// берём от первой квадратной скобки
+		return JSON.parse(out.slice(start))[0]?.results ?? [];
+	}
+
+	const account = await accountId();
+
+	const response = await fetch(`${CLOUDFLARE_API}/accounts/${account}/d1/database/${databaseId()}/query`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ sql }),
+	});
+
+	const body = await response.json().catch(() => null);
+
+	if (!response.ok || !body?.success) {
+		throw new Error((body?.errors ?? []).map(item => item.message).join('; ') || `HTTP ${response.status}`);
+	}
+
+	return body.result[0]?.results ?? [];
 }
 
 /**
