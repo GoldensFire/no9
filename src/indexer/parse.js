@@ -14,6 +14,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { db, authorsOrVk, buildMatchKey, saveAuthors } from '../db.js';
 import { openRemoteZip, DeadLinkError } from '../zip.js';
+import { isObsceneName } from '../obscene.js';
 import { parseContentXml } from '../siq.js';
 import { ensureThumb } from '../thumbs.js';
 import { thumbName } from '../logo.js';
@@ -183,6 +184,10 @@ export async function parsePackages() {
 					parsed.mediaRefs?.offsite ?? null,
 					logo.file,
 					logo.state,
+					// Мат и непристойность в названии: страница такого пака
+					// просит поисковик её не индексировать, но с сайта пак
+					// никуда не девается (см. src/obscene.js)
+					isObsceneName(parsed.name) ? 1 : 0,
 					Date.now(),
 					row.id,
 				);

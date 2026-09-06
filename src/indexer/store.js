@@ -127,12 +127,20 @@ export const markGone = db.prepare(`UPDATE packages SET status = 'gone', error =
 /** Файл вернули на место. */
 export const markBack = db.prepare(`UPDATE packages SET status = 'new', error = NULL WHERE id = ?`);
 
+/**
+ * Приговор по названию стоит здесь, рядом с самим названием, и это не удобство,
+ * а единственное место, где он не разъедется с ним. Название пака приезжает
+ * из его файла и меняется ровно тогда, когда автор перезаливает пак, — то есть
+ * этим самым запросом. Считай его где-нибудь ещё — и пак, переименованный
+ * из «хуйни» в «Кино и музыку», ходил бы с прежней пометкой до ближайшего
+ * пересчёта, которого никто не просил (см. src/obscene.js).
+ */
 export const updateParsed = db.prepare(`
 	UPDATE packages SET
 		name = ?, authors = ?, authors_key = ?, match_key = ?, author_difficulty = ?,
 		language = ?, pack_date = ?, pack_id = ?, size = ?, question_count = ?, round_count = ?,
 		theme_count = ?, special_count = ?, special_stat = ?, content_stat = ?, rounds = ?,
-		media_own = ?, media_offsite = ?, logo_file = ?, logo_state = ?,
+		media_own = ?, media_offsite = ?, logo_file = ?, logo_state = ?, obscene = ?,
 		status = 'ok', error = NULL, recheck = 0, indexed_at = ?
 	WHERE id = ?
 `);

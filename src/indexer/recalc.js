@@ -5,7 +5,7 @@
 // меняется только то, как из неё делаются выводы.
 
 import { config, MISC_KEY } from '../config.js';
-import { db, jsonOrDefault, repeatShare } from '../db.js';
+import { db, jsonOrDefault, markObscene, repeatShare } from '../db.js';
 import { OFFSITE_SHARE_SQL } from '../keys.js';
 import { toLevel } from '../stats.js';
 import { toPrimary } from '../topics.js';
@@ -260,9 +260,36 @@ function recalcOffsite() {
 		+ `${unknown > 0 ? `, не считано ещё у ${unknown} паков` : ''}`);
 }
 
-/** Общий пересчёт по сохранённым данным: и уровни, и ярлыки, и чужие ссылки. */
+/**
+ * Непристойные названия: пересуд по нынешнему списку слов.
+ *
+ * Сам приговор ставит разбор, когда читает название из файла (см. updateParsed
+ * в src/indexer/store.js), и после него пересчитывать нечего — название с тех
+ * пор не менялось. Пересчёт нужен на другой случай: правили список слов.
+ * Список этот живой — в него дописывают то, по чему поисковик привёл на сайт
+ * очередной раз, — и всякая правка обязана дойти до уже разобранной библиотеки,
+ * иначе новое слово работало бы только на паках, выложенных после него.
+ *
+ * Работает в обе стороны, как и чужие ссылки выше: слово, убранное из списка
+ * как слишком широкое, обязано вернуть свои паки в индекс. Ради этого пересчёт
+ * и смотрит на все паки подряд, а не на одни помеченные.
+ *
+ * Ни сети, ни модели — одни строки; на всей библиотеке это доли секунды.
+ */
+function recalcObscene() {
+	const target = targetSql();
+	const { marked, cleared } = markObscene(target.where, target.params);
+	const total = db.prepare(`SELECT COUNT(*) AS c FROM packages p
+		WHERE p.obscene = 1${target.where}`).get(...target.params).c;
+
+	say('recalc', `непристойные названия: закрыто от индексации ${marked}, `
+		+ `открыто обратно ${cleared}, всего под запретом ${total}`);
+}
+
+/** Общий пересчёт по сохранённым данным: и уровни, и ярлыки, и чужие ссылки, и названия. */
 export function recalcAll() {
 	recalcLevels();
 	recalcTopics();
 	recalcOffsite();
+	recalcObscene();
 }

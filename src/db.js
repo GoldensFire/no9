@@ -6,6 +6,7 @@ import {
 	jsonOrDefault, authorsOrVk, buildAuthorKey, buildMatchKey, splitAuthors, repeatShareSql,
 	PACK_KEY_INDEX_SQL, NAME_KEY_INDEX_SQL,
 } from './keys.js';
+import { isObsceneName } from './obscene.js';
 
 // Ключи пака и чтение его полей лежат в keys.js: тот файл ничего не знает
 // про node:sqlite, и его читает двойник сайта на Cloudflare Workers (см. cf/).
@@ -442,6 +443,18 @@ for (const [name, definition] of [
 	// в обсуждение по нескольку раз, и на сайте ему место одно — самое раннее.
 	// Номер хранится, чтобы копию было к чему вернуть, если старший пак умрёт
 	['copy_of', 'INTEGER'],
+	// Непристойно ли название пака: мат, порнография, брань (см. src/obscene.js).
+	//
+	// Пак от этого никуда не девается — он остаётся на сайте, в выдаче и в поиске
+	// по сайту. Меняется одно: его страница просит поисковик себя не
+	// индексировать и не едет в карту сайта (см. injectPackMeta в src/meta/pack.js
+	// и buildSitemap в src/meta/sitemap.js). Это не то же самое, что снятие
+	// с публикации через status='hidden'.
+	//
+	// Колонка, а не проверка на месте, — потому что название меняется раз
+	// в жизни пака, а страница его открывается тысячи раз, и наверху за каждую
+	// прочитанную строку платят по тарифу
+	['obscene', 'INTEGER NOT NULL DEFAULT 0'],
 ]) {
 	if (!existingColumns.has(name)) {
 		db.exec(`ALTER TABLE packages ADD COLUMN ${name} ${definition}`);
@@ -454,7 +467,67 @@ for (const [name, definition] of [
 		if (name === 'repeat_share') {
 			db.exec(`UPDATE packages SET repeat_share = ${repeatShareSql(config.subjectPackShare, 'packages')}`);
 		}
+
+		// И приговор по названию — тоже сразу, и по той же причине, что и доля
+		// выше. Иначе колонка стояла бы нулями до ближайшего `--recalc`, то есть
+		// до тех пор, пока его кто-нибудь не попросит руками: в ночном списке
+		// пересчёта нет (см. STEPS в src/indexer/steps.js). А нули здесь означают
+		// «все названия приличные» — то есть ровно то, из-за чего колонка
+		// и заведена, осталось бы несделанным.
+		//
+		// Проверка эта на строках, а не на SQL, поэтому идёт перебором: два
+		// десятка правил на одиннадцать тысяч названий — доли секунды, и второй
+		// раз сюда уже не заходят
+		if (name === 'obscene') {
+			markObscene();
+		}
 	}
+}
+
+/**
+ * Проставить признак «непристойное название» по всей базе.
+ *
+ * Живёт здесь, а не в шаге пересчёта, потому что зовут её двое: дозаливка
+ * колонки выше — один раз в жизни базы, и сам пересчёт — всякий раз, когда
+ * правили список слов (см. recalcObscene в src/indexer/recalc.js). Правило
+ * при этом обязано быть одно: разойдись они — и половина базы судилась бы
+ * по вчерашнему списку.
+ *
+ * Пишется только то, что изменилось: у D1 записанные строки идут по тарифу,
+ * а меняется здесь три сотни названий из одиннадцати тысяч.
+ *
+ * @param {string} where сужение до названных поимённо паков — кусок SQL
+ *   от targetSql, написанный через псевдоним `p` (см. src/indexer/queue.js)
+ * @param {Array} params его подстановки
+ * @returns {{marked: number, cleared: number}} скольким поставили и скольким сняли
+ */
+export function markObscene(where = '', params = []) {
+	const rows = db.prepare(`SELECT p.id, p.name, p.file_name, p.obscene
+		FROM packages p WHERE 1 = 1${where}`).all(...params);
+	const update = db.prepare('UPDATE packages SET obscene = ? WHERE id = ?');
+
+	let marked = 0;
+	let cleared = 0;
+
+	for (const row of rows) {
+		// Название, а нет его — имя файла: ровно то, что покажет заголовок
+		// вкладки и что уедет в карту сайта (см. packName в src/meta/pack.js)
+		const bad = isObsceneName(row.name ?? row.file_name) ? 1 : 0;
+
+		if (bad === (row.obscene ?? 0)) {
+			continue;
+		}
+
+		update.run(bad, row.id);
+
+		if (bad) {
+			marked++;
+		} else {
+			cleared++;
+		}
+	}
+
+	return { marked, cleared };
 }
 
 // Дозаливка колонок в список авторов
