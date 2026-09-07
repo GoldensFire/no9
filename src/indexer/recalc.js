@@ -5,7 +5,7 @@
 // меняется только то, как из неё делаются выводы.
 
 import { config, MISC_KEY } from '../config.js';
-import { db, jsonOrDefault, markObscene, repeatShare } from '../db.js';
+import { db, jsonOrDefault, markObscene, refreshStatsTwins, repeatShare } from '../db.js';
 import { OFFSITE_SHARE_SQL } from '../keys.js';
 import { toLevel } from '../stats.js';
 import { toPrimary } from '../topics.js';
@@ -286,10 +286,30 @@ function recalcObscene() {
 		+ `открыто обратно ${cleared}, всего под запретом ${total}`);
 }
 
+/**
+ * Сколько у каждого пака тёзок — паков, названных автором так же и потому
+ * посчитанных сервисом статистики в одну кучу.
+ *
+ * Стоит в пересчёте, а не в разборе, потому что число это общее: выложили
+ * пятнадцатый «Вопрос SIGame» — и у четырнадцати прежних оно поменялось, хотя
+ * их самих никто не трогал. Сужения до названных поимённо паков здесь нет
+ * по той же причине (см. refreshStatsTwins в src/db.js).
+ *
+ * По нему делится число игр в порядке выдачи: без него «популярные за всё
+ * время» открывались десятком паков одного автора, у которых на карточках
+ * стоит одно и то же число.
+ */
+function recalcTwins() {
+	const changed = refreshStatsTwins();
+
+	say('recalc', `тёзки по названию: число игр поделено заново у ${changed} паков`);
+}
+
 /** Общий пересчёт по сохранённым данным: и уровни, и ярлыки, и чужие ссылки, и названия. */
 export function recalcAll() {
 	recalcLevels();
 	recalcTopics();
 	recalcOffsite();
 	recalcObscene();
+	recalcTwins();
 }
