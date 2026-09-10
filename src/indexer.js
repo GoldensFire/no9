@@ -102,7 +102,7 @@ import { has, serial } from './indexer/options.js';
 import { report, TAGS, Track, track, tracks } from './indexer/progress.js';
 import { beginRun, isChosen, markFinished, selectedSteps } from './indexer/steps.js';
 import { scanVk } from './indexer/vk-scan.js';
-import { fetchLogos, parsePackages } from './indexer/parse.js';
+import { fetchLogos, hasThumb, parsePackages } from './indexer/parse.js';
 import { fetchDurations, fetchPrints, fetchSpecials } from './indexer/backfill.js';
 import { refreshStats } from './indexer/sistats.js';
 import { refreshAnalysis, refreshSummaries, refreshTopics } from './indexer/marking.js';
@@ -124,6 +124,12 @@ function printSummary() {
 	const waiting = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'new'`).get().c;
 	const withStats = db.prepare('SELECT COUNT(*) AS c FROM stats WHERE found = 1').get().c;
 	const withLogo = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE logo_state = 'ok'`).get().c;
+	// Логотип по базе есть, а показать его нечем: строка пака уедет наверх
+	// со ссылкой на обложку, которой на хостинге не окажется, — и посетитель
+	// увидит квадрат с первой буквой названия. Считается по складу копий,
+	// потому что в базе такому случаю пометки нет (см. fetchLogos в indexer/parse.js)
+	const noThumb = db.prepare(`SELECT logo_file FROM packages WHERE logo_state = 'ok' AND logo_file IS NOT NULL`)
+		.all().filter(row => !hasThumb(row.logo_file)).length;
 	const described = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE summary IS NOT NULL AND summary <> ''`).get().c;
 	// Главный предмет — франшиза или область, что из них крупнее (см. saveTopics в src/indexer/marking.js)
 	const withSubject = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE franchise_top IS NOT NULL`).get().c;
@@ -142,7 +148,9 @@ function printSummary() {
 		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}`
 		+ `${offsite > 0 ? `, на чужих ссылках ${offsite}` : ''}`
 		+ `${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
-	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}. С описанием: ${described}. С предметом: ${withSubject}.`);
+	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}`
+		+ `${noThumb > 0 ? ` (показать нечем у ${noThumb} — их доделает шаг «логотипы»)` : ''}`
+		+ `. С описанием: ${described}. С предметом: ${withSubject}.`);
 
 	if (specials > 0) {
 		console.log(`Спецвопросы не посчитаны у ${specials} паков: они разобраны раньше, чем их научились считать.`);

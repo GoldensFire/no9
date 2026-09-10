@@ -15,6 +15,11 @@
 // FirePacks обходится тем, что уже есть в Node), поэтому уменьшает ImageMagick
 // или ffmpeg — то, что и так стоит у любого, кто возится с паками. Нет ни того,
 // ни другого — сайт просто отдаёт оригинал: медленно, но правильно.
+//
+// Спрашиваются оба, а не тот, кто отозвался первым, и ответ каждого проверяется
+// по первым байтам файла: программа, не умеющая писать нужный формат, об этом
+// не всегда говорит — иногда она просто кладёт другой формат под нужным именем
+// (см. isAvif и resizeInto ниже).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -56,13 +61,6 @@ const PARALLEL = 4;
 const thumbsPath = config.thumbsPath;
 
 /**
- * Чем уменьшать. Ищется один раз при первом обращении: спрашивать систему
- * про каждую картинку незачем, а решать заранее нельзя — сайт запускается
- * и там, где нет ни того, ни другого.
- */
-let tool;
-
-/**
  * Кого спрашивать и в каком порядке.
  *
  * «convert» — это тот же ImageMagick, только шестой версии: в семёрке всё
@@ -77,25 +75,79 @@ let tool;
  */
 const TOOLS = process.platform === 'win32' ? ['magick', 'ffmpeg'] : ['magick', 'convert', 'ffmpeg'];
 
-function findTool() {
-	if (tool !== undefined) {
-		return tool;
+/** Кто из них нашёлся. Спрашивается один раз: система за это время не меняется. */
+let found;
+
+/**
+ * Кто из нашедшихся уже сделал настоящий AVIF. Дальше зовём сразу его: перебор
+ * нужен один раз, а не на каждую картинку.
+ */
+let proven;
+
+/** Все, кто нашёлся, в порядке TOOLS. Пустой список — уменьшать нечем. */
+function tools() {
+	if (found !== undefined) {
+		return found;
 	}
 
-	for (const candidate of TOOLS) {
+	found = TOOLS.filter(candidate => {
 		try {
 			// -version у обоих; важно лишь то, что программа нашлась и запустилась
 			execFileSync(candidate, ['-version'], { stdio: 'ignore', timeout: 10000 });
-			tool = candidate;
-			return tool;
+			return true;
 		} catch {
-			// пробуем следующую
+			return false;
+		}
+	});
+
+	if (found.length === 0) {
+		console.log('Уменьшать обложки нечем (нет ни ImageMagick, ни ffmpeg) — отдаём как есть.');
+	}
+
+	return found;
+}
+
+/**
+ * Правда ли в файле AVIF — по первым байтам, а не по имени.
+ *
+ * Спрашивать приходится потому, что «команда прошла» и «получилось то, что
+ * просили» — разные вещи, и разошлись они молча. ImageMagick шестой версии,
+ * тот самый, что стоит на машине Actions, AVIF только читает
+ * (в `convert -list format` у него стоит `AVIF r--`). Просьбу записать копию
+ * в .avif он не выполняет и не отказывается: пишет предупреждение
+ * «no encode delegate», кладёт по имени копии исходный формат — PNG под именем
+ * .avif — и выходит с нулём. Мы это считали успехом.
+ *
+ * Стоило это двух бед сразу. Первая — вес и враньё в Content-Type: две трети
+ * склада обложек (1942 файла из 3107) оказались jpg, png и webp под именем
+ * .avif, а png у пака 21582 весит 50 КБ вместо четырёх. Вторая — та, ради
+ * которой всё это и написано: у пака, чья обложка внутри уже avif, подменять
+ * формат нечем — исходный и есть AVIF, — и ImageMagick честно падает. Так пак
+ * 21584 («Sabaton пак от GoldensFire») уехал на сайт со строкой logo_state='ok'
+ * и без единого файла за ней.
+ *
+ * Проверка дешёвая: тридцать два байта с начала. У AVIF там коробка ftyp
+ * и марка avif либо avis (у HEIF-овских mif1/msf1 — в списке совместимых).
+ */
+export function isAvif(file) {
+	const head = Buffer.alloc(32);
+	let handle;
+
+	try {
+		handle = fs.openSync(file, 'r');
+
+		if (fs.readSync(handle, head, 0, 32, 0) < 12) {
+			return false;
+		}
+	} catch {
+		return false;
+	} finally {
+		if (handle !== undefined) {
+			fs.closeSync(handle);
 		}
 	}
 
-	tool = null;
-	console.log('Уменьшать обложки нечем (нет ни ImageMagick, ни ffmpeg) — отдаём как есть.');
-	return tool;
+	return head.toString('latin1', 4, 8) === 'ftyp' && /avif|avis|mif1|msf1/.test(head.toString('latin1', 8, 32));
 }
 
 const run = (file, args) => new Promise((resolve, reject) => {
@@ -119,7 +171,7 @@ const run = (file, args) => new Promise((resolve, reject) => {
  * Первый кадр берётся явно ([0] у ImageMagick): обложки бывают анимированными
  * гифками, и без этого на выходе оказывалась вся анимация целиком.
  */
-function command(source, target, { size, quality }) {
+function command(tool, source, target, { size, quality }) {
 	if (tool === 'magick' || tool === 'convert') {
 		return [tool, [
 			`${source}[0]`,
@@ -173,9 +225,22 @@ function schedule(task) {
 
 /**
  * Кладёт в target уменьшенную копию source. Формат выбирается по расширению
- * target, папка под него создаётся. Возвращает, получилось ли: не получиться
- * может по двум причинам — уменьшать нечем или картинка не по зубам тому,
- * что нашлось. Обе не смертельны, и обоим, кто сюда ходит, есть чем ответить.
+ * target, папка под него создаётся. Возвращает, получилось ли.
+ *
+ * Спрашиваются все, кто нашёлся, а не один первый попавшийся, и это правка
+ * по живому случаю. Прежде тот, кто первым отозвался на `-version`, объявлялся
+ * единственным на весь запуск, — а на машине Actions первым отзывается
+ * ImageMagick шестой версии, который AVIF не пишет вовсе (см. isAvif выше).
+ * ffmpeg, стоящий там же и рядом, не спрашивали никогда: до него очередь
+ * не доходила. Теперь доходит.
+ *
+ * Каждый ответ проверяется по первым байтам: «команда прошла» слишком часто
+ * означает «положил что-то другое под нужным именем». Не тот формат — тот же
+ * отказ, что и упавшая команда, и очередь идёт дальше.
+ *
+ * Последний ход — отдать исходник как есть, и только когда он и сам AVIF:
+ * тогда подменять нечего, формат верный, разница одна — вес. Обложка на 260 КБ
+ * вместо шести — плохо; квадрат с буквой вместо обложки — хуже.
  *
  * Одновременных запусков не больше PARALLEL, кто бы ни звал.
  *
@@ -183,7 +248,9 @@ function schedule(task) {
  *   карточки; PREVIEW — крупная копия для чужих окон.
  */
 export function resizeInto(source, target, shape = THUMB) {
-	if (!findTool()) {
+	const candidates = tools();
+
+	if (candidates.length === 0) {
 		return Promise.resolve(false);
 	}
 
@@ -200,15 +267,39 @@ export function resizeInto(source, target, shape = THUMB) {
 		// выходил в двадцать пять раз больше обещанного, а Content-Type врал.
 		const temporary = path.join(directory, `.tmp-${process.pid}-${path.basename(target)}`);
 
-		try {
-			const [file, args] = command(source, temporary, shape);
-			await run(file, args);
-			fs.renameSync(temporary, target);
-			return true;
-		} catch {
-			fs.rmSync(temporary, { force: true });
-			return false;
+		// Проверяем то, что просили: обе копии проекта — .avif (см. thumbName
+		// и previewName в src/logo.js), а общее правило звучит «формат по имени».
+		const wantAvif = target.toLowerCase().endsWith('.avif');
+
+		// Тот, кто уже справился, идёт первым — но не единственным: картинка,
+		// которую не читает он, может оказаться по зубам соседу
+		const order = proven ? [proven, ...candidates.filter(name => name !== proven)] : candidates;
+
+		for (const name of order) {
+			try {
+				const [file, args] = command(name, source, temporary, shape);
+				await run(file, args);
+
+				if (wantAvif && !isAvif(temporary)) {
+					throw new Error(`${name} положил не AVIF`);
+				}
+
+				fs.renameSync(temporary, target);
+				proven = name;
+				return true;
+			} catch {
+				fs.rmSync(temporary, { force: true });
+			}
 		}
+
+		if (wantAvif && isAvif(source)) {
+			console.log(`Уменьшить ${path.basename(source)} нечем — везём как есть:`
+				+ ' формат верный, вес полный.');
+			fs.copyFileSync(source, target);
+			return true;
+		}
+
+		return false;
 	});
 }
 
@@ -217,13 +308,20 @@ export function resizeInto(source, target, shape = THUMB) {
  * Возвращает null, когда уменьшать нечем или не получилось: тогда сайт
  * отдаёт оригинал, и единственная разница — вес страницы.
  *
+ * Готовая копия годной считается не по имени, а по содержимому: файл .avif,
+ * внутри которого лежит png, — это работа шестого ImageMagick с машины Actions
+ * (см. isAvif выше), и переделать его надо. Переделываем, впрочем, только когда
+ * оригинал под рукой: тащить его заново из ВК ради веса страницы — не эта
+ * работа, её делает шаг логотипов (см. fetchLogos в src/indexer/parse.js).
+ *
  * @param {string} logoFile имя файла в папке логотипов, например «511.jpg»
  */
 export async function ensureThumb(logoFile) {
 	const source = path.join(config.logosPath, logoFile);
 	const target = path.join(thumbsPath, thumbName(logoFile));
+	const ready = fs.existsSync(target);
 
-	if (fs.existsSync(target)) {
+	if (ready && (isAvif(target) || !fs.existsSync(source))) {
 		return target;
 	}
 
@@ -235,8 +333,10 @@ export async function ensureThumb(logoFile) {
 		return inFlight.get(target);
 	}
 
+	// Переделать не вышло, а прежняя копия лежит — отдаём прежнюю: она хуже
+	// (не тот формат под верным именем), но она есть, а «нет» было бы хуже вдвое
 	const job = resizeInto(source, target)
-		.then(done => (done ? target : null))
+		.then(done => (done || ready ? target : null))
 		.finally(() => inFlight.delete(target));
 
 	inFlight.set(target, job);
