@@ -2,7 +2,7 @@
 
 import {
 	config, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, MISC_KEY, OTHER_KIND_KEYS, GENRES, isNotableGenre,
-	ORIGIN_KEYS, DECADE_MIN, FORMS, KIND_PACKS, SPORT_KEY,
+	ORIGIN_KEYS, DECADE_MIN, FORMS, HOLIDAYS, KIND_PACKS, SPORT_KEY,
 } from './config.js';
 import { Names, nameKey, isFormatMarker, isAreaName, mergeRelated } from './franchise.js';
 
@@ -483,6 +483,36 @@ export function computeAreas(themes, marks) {
 	return countNamed(themes, marks, mark => [{ names: [mark?.area, mark?.areaEn], whole: true }], {
 		kind: 'area',
 		limit: config.areaLimit,
+	});
+}
+
+/**
+ * Праздники, по поводу которых пак сделан: «Новый год», «Хэллоуин».
+ *
+ * Считается тем же счётом, что франшизы и области, но по своему полю разметки
+ * (см. HOLIDAYS в names.js). Врозь от области — потому что праздник означает
+ * третье: не «к чему пак возвращается» и не «про что он весь», а «по какому
+ * поводу его собрали». С предметом темы он не спорит и не вытесняет его:
+ * тема «Лучшие новогодние фильмы» — тема про кино, и предметом у неё остаётся
+ * кино, а праздник считается сверх того.
+ *
+ * Ровно поэтому новогодние паки прежде и терялись. Праздник приходилось писать
+ * в область, а область у темы одна и достаётся тому, о чём тема: у пака 13014
+ * («Дед Егор и Ко Новый Год») новогодними оказались пять тем из двадцати одной —
+ * те, у которых своего предмета не нашлось, — и вышло 21% вместо ста.
+ *
+ * Повтором праздник не бывает никогда, как и область: «Новый год ×5» в паке,
+ * который весь про Новый год, — это пересказ названия числом. Место ему там же,
+ * где области, — в ярлыке-мишени «пак целиком про одно» (см. subjectPackShare
+ * в settings.js и mostCommon в web/card-badges.js).
+ */
+export function computeHolidays(themes, marks) {
+	return countNamed(themes, marks, mark => [{ names: [HOLIDAYS[mark?.holiday]], whole: true }], {
+		kind: 'holiday',
+		// Праздник у пака один: два — это уже не повод, а совпадение разметки.
+		// Второй в списке нужен затем, чтобы у пака, где новогодних тем половина
+		// и хеллоуинских половина, мишень выбирала доля, а не порядок
+		limit: 2,
 	});
 }
 

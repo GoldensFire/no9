@@ -74,7 +74,7 @@ function wholePack(row, item) {
 	const themes = row.theme_count ?? 0;
 	const questions = row.question_count ?? 0;
 
-	if (item.kind === 'area' || themes < config.franchiseMinThemes
+	if (item.kind !== 'work' || themes < config.franchiseMinThemes
 		|| item.themes !== themes || (item.questions ?? 0) >= questions) {
 		return item;
 	}

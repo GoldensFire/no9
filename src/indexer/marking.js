@@ -20,8 +20,8 @@ import { classifyThemes } from '../gemini/themes.js';
 import { describePack } from '../gemini/summary.js';
 import { usageLine } from '../models.js';
 import {
-	listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeOtherKinds,
-	computeGenres, computeForms, computeDecades, computeOrigin,
+	listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeHolidays,
+	computeOtherKinds, computeGenres, computeForms, computeDecades, computeOrigin,
 } from '../topics.js';
 import { geminiQuotaSpent, geminiReady, noteGeminiFailure } from './model.js';
 import { reparse, resummary, retopics, upgrade } from './options.js';
@@ -53,7 +53,10 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 	// (см. computeAreas в topics.js). Кто из них главный — решает доля: ярлык
 	// пака про Вторую мировую берётся оттуда же, откуда ярлык пака про «Наруто»
 	const repeats = computeFranchises(themes, marks);
-	const franchises = [...repeats, ...computeAreas(themes, marks)]
+	// Праздники едут третьей кучкой в тот же список: пак, сделанный к Новому
+	// году или к Хеллоуину, — такой же «пак целиком про одно», как пак про
+	// футбол, и мишень ему нужна ровно так же (см. computeHolidays в topics.js)
+	const franchises = [...repeats, ...computeAreas(themes, marks), ...computeHolidays(themes, marks)]
 		.sort((a, b) => b.share - a.share || b.themes - a.themes);
 	const top = franchises[0] ?? null;
 	// Жанры считаются от типа пака, поэтому строкой ниже toPrimary:
@@ -118,8 +121,10 @@ function saveTopics(step, label, row, themes, marks, model, tally) {
 		.map(f => `${f.name} ×${f.themes}`)
 		.join(', ');
 
+	// Мишень пака: и область («Футбол»), и праздник («Новый год»). Обе отвечают
+	// на один вопрос — «про что этот пак весь», — и в логе им место одной строкой
 	const areas = franchises
-		.filter(f => f.kind === 'area')
+		.filter(f => f.kind !== 'work')
 		.map(f => `${f.name} ${Math.round(f.share * 100)}%`)
 		.join(', ');
 

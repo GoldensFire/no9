@@ -9,7 +9,7 @@
 // в api.js.
 
 import {
-	config, DECADE_MIN, EXCLUSIVE_TOPIC_KEYS, MUSIC_KEY, ORIGIN_KEYS,
+	config, DECADE_MIN, EXCLUSIVE_TOPIC_KEYS, HOLIDAY_KEYS, MUSIC_KEY, ORIGIN_KEYS,
 	OTHER_KIND_KEYS, SPORT_KEY, isForm, isGenre,
 } from '../config.js';
 import { cleanArea, isCategoryName } from '../franchise.js';
@@ -107,6 +107,7 @@ const UNMARKED = {
 	areaEn: '',
 	works: [],
 	kind: '',
+	holiday: '',
 	genres: [],
 	musicGenres: [],
 	forms: [],
@@ -288,6 +289,11 @@ export function collectMarks(batch, answers, result = new Map()) {
 				// Вид «прочего»: чем эта общая куча оказалась на деле — стримерами,
 				// историей, спортом. У остальных категорий вида нет и быть не должно
 				kind: answer.c === 'other' && OTHER_KIND_KEYS.includes(answer.k) ? answer.k : '',
+				// Праздник, по поводу которого тему сделали. Спрашивается у всех
+				// категорий и ни с чем не спорит: новогодняя тема про кино
+				// остаётся темой про кино, а праздник у неё сверх того
+				// (см. computeHolidays в topics.js и HOLIDAYS в names.js)
+				holiday: HOLIDAY_KEYS.includes(answer.h) ? answer.h : '',
 				// Носитель темы: манга или манхва, фильм или сериал. Отсюда делится
 				// верхняя полоска карточки — тот её кусок, который у манга-пака
 				// занимает всё и до сих пор не говорил ничего (см. computeForms

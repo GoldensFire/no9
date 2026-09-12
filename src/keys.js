@@ -320,6 +320,57 @@ export function splitAuthors(authors) {
 }
 
 /**
+ * Подписи пака — по людям, а не по написаниям.
+ *
+ * Разные написания одного человека сведены в базе к одному канону (см.
+ * mergeAuthors в src/indexer/authors.js), и на карточке человеку показывается
+ * канон — имя, под которым его знают. Написаний при этом бывает много, и до
+ * сих пор каждое из них выводило по строке: пак 19601 («Одиссея по
+ * гипоталамусу») подписан двадцатью шутками — «Стивен Хокинг», «Святой Дух»,
+ * «Губка Боб Квадратные Штаны», — все двадцать сведены к teraaakot, и под
+ * заголовком стояло «teraaakot» двадцать раз подряд. В описании для поисковика
+ * оно же — двадцать раз через запятую, до обрезки по длине.
+ *
+ * Поэтому человек в списке остаётся один, первым своим написанием. Остальные
+ * его написания не теряются, а едут при нём (keys): по ним стоит галочка
+ * автора и узнаётся свой пак, и потеряй их — подтверждённый автор, подписавший
+ * файл вторым своим ником, остался бы без галочки.
+ *
+ * @param {string[]} written подписи из файла, уже разобранные (см. splitAuthors)
+ * @param {Map<string, {name?: string, slug?: string}>} counts готовый счёт паков
+ *   по подписям: из него берутся канон-имя и кусок адреса страницы автора
+ * @returns {Array<{key: string, name: string, keys: string[]}>} по человеку
+ *   в строке: ключ первого написания, показываемое имя и все его написания
+ */
+export function mergeWrittenAuthors(written, counts) {
+	const people = [];
+	const at = new Map();
+
+	for (const author of written ?? []) {
+		const key = buildAuthorKey(author);
+		const found = counts?.get(key);
+		const name = found?.name || author;
+		// Один человек — это либо одна страница автора, либо одно показываемое
+		// имя. Кусок адреса надёжнее: имена «Кот» и «кот» на странице одни и те
+		// же, а вот у автора без своей страницы его нет вовсе, и тогда сверяются
+		// имена — тем же правилом, каким считается ключ подписи
+		const mark = found?.slug || buildAuthorKey(name) || key;
+		const same = at.get(mark);
+
+		if (same) {
+			same.keys.push(key);
+			continue;
+		}
+
+		const person = { key, name, keys: [key] };
+		at.set(mark, person);
+		people.push(person);
+	}
+
+	return people;
+}
+
+/**
  * Ключ пака, общий для всех его копий: один и тот же файл нередко выложен
  * в обсуждение не по разу, и всё, что человек про пак говорит, — отметка
  * «сыграно», оценка, чёрный список — относится к паку, а не к строке в базе.
@@ -448,8 +499,10 @@ export const AUTHOR_NAME_SQL = `
  *
  * Из счёта выброшено то же самое, что не показывает и карточка:
  *
- *   область («Футбол», «Вторая мировая») — повтором не бывает: викторина
- *     из областей и состоит, и «География ×5» о паке не говорит ничего;
+ *   всё, что не произведение, — область («Футбол», «Вторая мировая») и праздник
+ *     («Новый год»): повтором они не бывают, викторина из областей и состоит,
+ *     и «География ×5» о паке не говорит ничего, а «Новый год ×5» у новогоднего
+ *     пака — пересказ его названия числом;
  *   предмет самого пака (доля от subjectPackShare и выше) — у пака про Гарри
  *     Поттера «Гарри Поттер ×27» не наблюдение, а пересказ названия числом.
  *
@@ -462,7 +515,7 @@ export const AUTHOR_NAME_SQL = `
  */
 export function repeatShare(franchises, own) {
 	return (franchises ?? [])
-		.filter(item => item?.kind !== 'area' && (item?.share ?? 0) < own)
+		.filter(item => item?.kind === 'work' && (item?.share ?? 0) < own)
 		.reduce((sum, item) => sum + (item.share ?? 0), 0);
 }
 
@@ -476,7 +529,7 @@ export function repeatShare(franchises, own) {
 export const repeatShareSql = (own, table = 'p') => `COALESCE((
 	SELECT SUM(json_extract(value, '$.share'))
 	FROM json_each(CASE WHEN json_valid(${table}.franchises) THEN ${table}.franchises ELSE '[]' END)
-	WHERE COALESCE(json_extract(value, '$.kind'), '') <> 'area'
+	WHERE json_extract(value, '$.kind') = 'work'
 		AND json_extract(value, '$.share') < ${Number(own)}
 ), 0)`;
 

@@ -68,6 +68,21 @@ const METRIKA = 'https://mc.yandex.ru';
 const METRIKA_WS = 'wss://mc.yandex.ru';
 const METRIKA_COM = 'https://mc.yandex.com';
 const INSIGHTS = 'https://static.cloudflareinsights.com';
+
+/**
+ * Рекламная сеть Яндекса: баннер над выдачей паков (см. web/rtb.js).
+ *
+ * С yandex.ru приходит context.js, с an.yandex.ru — решение об объявлении,
+ * yastatic.net держит код, стили и шрифты. Часть форматов использует Adfox,
+ * yandex.com и рамки yandexadexchange.net. Одних картинок и скриптов мало:
+ * видео, стили и шрифты тоже должны проходить своё правило.
+ * См. https://yandex.ru/support/partner/ru/web/adplatform/csp-configuration
+ *
+ * Само объявление рисуется в рамке — отсюда frame-src; рамка эта чужая,
+ * и что внутри неё, сайт не решает.
+ */
+const ADS = 'https://yandex.ru https://*.yandex.ru https://yandex.com https://yastatic.net https://*.yandex.net https://*.adfox.ru';
+const ADS_FRAMES = 'https://yandexadexchange.net https://*.yandexadexchange.net';
 const INSIGHTS_BEACON = 'https://cloudflareinsights.com';
 
 /**
@@ -115,11 +130,20 @@ const CSP = [
 	`object-src 'none'`,
 	`frame-ancestors 'none'`,
 	`form-action 'self'`,
-	`script-src 'self' ${METRIKA} ${INSIGHTS}${INLINE_SCRIPT_HASHES.map(hash => ` '${hash}'`).join('')}`,
-	`style-src 'self' 'unsafe-inline'`,
-	`img-src 'self' data: blob: ${AVATARS} ${METRIKA}`,
-	`connect-src 'self' ${METRIKA} ${METRIKA_WS} ${METRIKA_COM} ${INSIGHTS_BEACON}`,
-	`frame-src ${METRIKA}`,
+	// 'unsafe-eval' стоит здесь ради РСЯ и только ради неё: код показа
+	// объявления собирает себя на ходу, и без этого разрешения баннер
+	// не появляется вовсе. Плата настоящая, и молчать о ней нечестно —
+	// но выбор тут между «реклама есть» и «реклама не работает».
+	`script-src 'self' 'unsafe-eval' ${METRIKA} ${INSIGHTS} ${ADS}${INLINE_SCRIPT_HASHES.map(hash => ` '${hash}'`).join('')}`,
+	`style-src 'self' 'unsafe-inline' https://yastatic.net https://*.adfox.ru`,
+	`img-src 'self' data: blob: ${AVATARS} ${METRIKA} ${ADS}`,
+	`connect-src 'self' blob: ${METRIKA} ${METRIKA_WS} ${METRIKA_COM} ${INSIGHTS_BEACON} ${ADS}`,
+	`frame-src ${METRIKA} ${ADS} ${ADS_FRAMES}`,
+	`media-src 'self' blob: data: ${ADS}`,
+	// Объявление приходит со своим шрифтом с yastatic.net. Отдельной строкой
+	// потому, что своих шрифтов у сайта нет вовсе и до сих пор про них молчал
+	// default-src — а он же и запрещал чужие.
+	`font-src 'self' data: ${ADS}`,
 	`worker-src 'self' blob:`,
 ].join('; ');
 
