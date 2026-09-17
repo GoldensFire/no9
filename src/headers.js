@@ -52,8 +52,9 @@ export const INLINE_SCRIPT_HASHES = [
 	'sha256-DZfls+1+7cBrlfB18HidMv0+vybLkzCDM8aXMhGXp4s=',
 	// window.libraryEmbedded = true — профиль
 	'sha256-AdQeLZoJQp0rlkEc96UaJv9NKEypo5BHhvKXbMZrN18=',
-	// initTopbar()
-	'sha256-+iegU3AY4xPp7UZldCRo6gc4HindPWOdUQ4JDwFQib0=',
+	// initTopbar() — на страницах без своего скрипта, из-под DOMContentLoaded:
+	// связки едут с defer и на месте своего тега уже не выполняются
+	'sha256-f2OgeMTCDtY6nkOEIPk9pxFOcM7qYHqi5TyxeAOokaQ=',
 	// Счётчик Яндекс.Метрики
 	'sha256-bI489q0eurIMH4NrGWTz2xuNDsc5S/pTQNqu38P3F7c=',
 	// window.homeBoot=1 — дописывает Worker, в собранной вёрстке его нет
