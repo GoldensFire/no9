@@ -305,7 +305,7 @@ export async function refreshSummaries() {
 					themes,
 				});
 
-				saveSummary(row, model, summary, audience, language, translations);
+				const saved = saveSummary(row, model, summary, audience, language, translations);
 
 				if (summary) {
 					described++;
@@ -315,7 +315,7 @@ export async function refreshSummaries() {
 
 				say('summary', `${label} «${row.name}»: ${summary || 'сказать нечего'}`);
 				say('summary', `      ${audienceLine(audience)}`);
-				say('summary', `      ${languageLine(language, row.language)}`);
+				say('summary', `      ${languageLine(saved.language, row.language, language)}`);
 			} catch (error) {
 				say('summary', `${label} «${row.name}»: ${error.message}`);
 
@@ -503,7 +503,8 @@ export async function refreshAnalysis() {
 					// и каждую же ночь молча из неё выпадает (см. refreshTopics)
 					saveTopics('analyze', label, row, themes, themes.length > 0 ? answer.marks : new Map(), model, tally);
 
-					saveSummary(row, model, answer.summary, answer.audience, answer.language, answer.translations);
+					const saved = saveSummary(row, model, answer.summary, answer.audience,
+						answer.language, answer.translations);
 
 					if (answer.summary) {
 						described++;
@@ -521,7 +522,7 @@ export async function refreshAnalysis() {
 					// Какой язык модель насчитала этому паку. Стоит рядом
 					// с аудиторией и по той же причине: и то, и другое — её
 					// суждение, а не запись из файла (см. languageLine в src/indexer/store.js)
-					say('analyze', `      ${languageLine(answer.language, row.language)}`);
+					say('analyze', `      ${languageLine(saved.language, row.language, answer.language)}`);
 
 					// Что модель искала в поиске. Строка нужна не для красоты: по ней
 					// видно, гуглит ли она то, о чём пак, — или само шуточное название

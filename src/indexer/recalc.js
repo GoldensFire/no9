@@ -7,6 +7,7 @@
 import { config, MISC_KEY } from '../config.js';
 import { db, jsonOrDefault, markObscene, refreshStatsTwins, repeatShare } from '../db.js';
 import { OFFSITE_SHARE_SQL } from '../keys.js';
+import { CYRILLIC_LANGS, langKey, languageByThemes } from '../language.js';
 import { toLevel } from '../stats.js';
 import { toPrimary } from '../topics.js';
 import { isCategoryName } from '../franchise.js';
@@ -305,11 +306,62 @@ function recalcTwins() {
 	say('recalc', `тёзки по названию: число игр поделено заново у ${changed} паков`);
 }
 
+/**
+ * Язык пака: отмена латинского приговора там, где темы написаны кириллицей.
+ *
+ * Правило само живёт отдельно и считается по темам (см. languageByThemes
+ * в src/language.js); применяет его запись ответа модели — но применяет
+ * начиная с той ночи, когда правило завелось. У паков, размеченных раньше,
+ * в базе уже лежит «en», и переспрашивать ради этого модель нечем: суточного
+ * лимита хватает на сотни паков, а ответ про язык у неё и так есть — просто
+ * неправильный. Здесь он и правится по тому, что уже записано.
+ *
+ * Смотрит пересчёт не на всю библиотеку, а на паки, у которых ВИДИМЫЙ язык
+ * не кириллический, — то есть на два десятка строк из одиннадцати тысяч.
+ * Сужение это не украшение: в строке пака лежат разобранные раунды, и обход
+ * всей базы ради двадцати паков поднял бы её целиком.
+ *
+ * Пишется итог в language_ai, а не в language: на сайте старше именно он
+ * (см. LANG_SQL в src/server/filters.js), и «en-US», записанное редактором
+ * в сам файл, иначе продолжало бы перебивать исправление.
+ */
+function recalcLanguages() {
+	const target = targetSql();
+	const cyrillic = CYRILLIC_LANGS.map(() => '?').join(', ');
+
+	const rows = db.prepare(`SELECT p.id, p.name, p.language, p.language_ai, p.rounds FROM packages p
+		WHERE p.rounds IS NOT NULL
+			AND LOWER(SUBSTR(COALESCE(NULLIF(p.language_ai, ''), p.language), 1, 2)) NOT IN (${cyrillic})
+			${target.where}`).all(...CYRILLIC_LANGS, ...target.params);
+
+	const update = db.prepare('UPDATE packages SET language_ai = ? WHERE id = ?');
+
+	let changed = 0;
+
+	for (const row of rows) {
+		const seen = langKey(row.language_ai || row.language);
+
+		if (!seen) {
+			continue;
+		}
+
+		const fixed = languageByThemes(seen, row.language, jsonOrDefault(row.rounds, []), row.name);
+
+		if (fixed !== seen) {
+			update.run(fixed, row.id);
+			changed++;
+		}
+	}
+
+	say('recalc', `язык пака: проверено по темам ${rows.length}, переписано ${changed}`);
+}
+
 /** Общий пересчёт по сохранённым данным: и уровни, и ярлыки, и чужие ссылки, и названия. */
 export function recalcAll() {
 	recalcLevels();
 	recalcTopics();
 	recalcOffsite();
 	recalcObscene();
+	recalcLanguages();
 	recalcTwins();
 }

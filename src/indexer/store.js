@@ -9,7 +9,8 @@
 // десятки тысяч раз.
 
 import { LANGUAGE_NAMES, TOPICS_VERSION } from '../config.js';
-import { db } from '../db.js';
+import { db, jsonOrDefault } from '../db.js';
+import { languageByThemes } from '../language.js';
 import { countPrints, encodePrints, PRINTS_VERSION } from '../plagiarism.js';
 
 export const insertPackage = db.prepare(`
@@ -187,6 +188,12 @@ const updateSummary = db.prepare(`
  * Сайту пустая строка и NULL — одно и то же: и там, и там он берёт язык
  * из файла (см. LANG_SQL в cf/src/library/filters.js).
  *
+ * Названный моделью язык проверяется письмом тем прямо здесь, до записи
+ * (см. languageByThemes в src/language.js): «en» у пака, чьи темы написаны
+ * кириллицей, отменяется. Не в разборе ответа и не на сайте, а именно тут:
+ * это единственное место, через которое ответ модели попадает в базу, — а два
+ * места, где написано одно и то же правило, разойдутся на первой же правке.
+ *
  * Описание приезжает сразу на четырёх языках сайта — тем же ответом и тем же
  * запросом (см. SUMMARY_LANGS в src/gemini/summary.js). Пустой перевод прежний
  * не стирает (COALESCE в самом запросе): у паков, описанных до этой правки,
@@ -194,6 +201,13 @@ const updateSummary = db.prepare(`
  * и промолчавшая модель не должна их обнулять.
  */
 export function saveSummary(row, model, summary, audience, language = null, translations = null) {
+	// Промолчавшую модель проверять нечем и не за что: null здесь значит
+	// «ответа нет», и он должен доехать до запроса нетронутым — там он оставит
+	// прежний язык на месте (COALESCE ниже)
+	const checked = language === null || language === ''
+		? language
+		: languageByThemes(language, row.language, jsonOrDefault(row.rounds, []), row.name);
+
 	updateSummary.run(
 		summary || null,
 		Date.now(),
@@ -209,9 +223,14 @@ export function saveSummary(row, model, summary, audience, language = null, tran
 		// у пака один и тот же от разбора к разбору, а «не сказала» — это
 		// не «языка нет». Зато пустую строку она ставит, и это отметка
 		// «спрашивали» (COALESCE в самом запросе)
-		language,
+		checked,
 		row.id,
 	);
+
+	// Наружу — то, что легло в базу, а не то, что сказала модель: по нему пишется
+	// строка в журнале, и она обязана называть язык, который у пака теперь есть
+	// (см. languageLine ниже)
+	return { language: checked };
 }
 
 /** Аудитория строкой для лога: «18–25 лет, М 70% / Ж 30%». */
@@ -234,11 +253,15 @@ export const audienceLine = audience => (audience
  * «спросили, а ответа нет», и молча пропускать это в логе нельзя — иначе
  * пак без языка выглядит паком, про который не спрашивали.
  */
-export const languageLine = (language, fromFile) => {
+export const languageLine = (language, fromFile, said = language) => {
 	const own = fromFile ? `, в файле ${fromFile}` : ', в файле не указан';
+	// Отменённый по письму тем приговор называется вслух вместе с прежним:
+	// ради этого строка и заведена — расхождение должно быть видно, а не молча
+	// исправлено (см. languageByThemes в src/language.js)
+	const veto = said && said !== language ? `, модель назвала ${said} — темы кириллицей` : '';
 
 	return language
-		? `язык: ${LANGUAGE_NAMES[language] ?? language} (${language})${own}`
+		? `язык: ${LANGUAGE_NAMES[language] ?? language} (${language})${own}${veto}`
 		: `язык: модель не назвала${own}`;
 };
 export const updateSpecials = db.prepare('UPDATE packages SET special_count = ?, special_stat = ? WHERE id = ?');
