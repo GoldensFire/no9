@@ -94,7 +94,13 @@ jobs:
       contents: write
 
     steps:
+      # Вершина ветки на момент запуска, а не метка, которой запуск заведён.
+      # Ночной обход ждёт в очереди реже ежечасного, но выкладывает он то же
+      # самое и той же командой, так что отстать от конфига может ровно так же
+      # (что это за беда — расписано в .github/workflows/hourly.yml).
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
 
       - uses: actions/setup-node@v7
         with:
