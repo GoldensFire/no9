@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { config } from './config.js';
-import { thumbName } from './logo.js';
+import { previewName, thumbName } from './logo.js';
 
 /** Сторона квадрата. Вдвое больше, чем на карточке: под экраны с удвоением точек. */
 const SIZE = 144;
@@ -342,3 +342,75 @@ export async function ensureThumb(logoFile) {
 	inFlight.set(target, job);
 	return job;
 }
+
+/**
+ * То же самое для крупной копии — той, что уезжает в чужое окно карточкой
+ * ссылки (см. previewName в src/logo.js и PREVIEW выше).
+ *
+ * ————— зачем она считается здесь, а не при сборке сайта —————
+ *
+ * Считалась она только там, в scripts/build-web.js, и стоило это всех картинок
+ * в Discord у всякого свежего пака. Обложку карточки наверх кладёт отдельный
+ * Worker, которого выкладывает ночной и ежечасный обход прямо из Actions
+ * (см. scripts/deploy-logos.js), — а крупную копию собирала сборка сайта,
+ * то есть только дом и только руками. Выходило так: пак, найденный в 14:54,
+ * получал обложку на карточке через час, а картинку в чужом окне — никогда,
+ * пока хозяин не выложит сайт. Ссылкой на такой пак делились, и в Discord
+ * приезжал пустой серый прямоугольник (пак 21599, сентябрь 2026).
+ *
+ * Теперь обе копии считаются в одном месте и в одну минуту — там, где оригинал
+ * ещё под рукой (см. fetchLogo в src/indexer/parse.js). Склад крупных копий
+ * ездит на полке рядом со складом обложек (см. scripts/state/shelf.js),
+ * и наверх их увозит тот же Worker, что и обложки.
+ *
+ * ————— чем отличается от ensureThumb —————
+ *
+ * Тем, что делается строго из оригинала. Обложка карточки — это 144×144,
+ * и растянуть её до 512 значит получить мыло: так вышло у 1752 копий из 3111,
+ * сделанных прежней сборкой по запасному пути «нет оригинала — возьми копию».
+ * Крупную картинку показывают во всю ширину карточки ссылки, и мыло там видно
+ * сразу. Нет оригинала — лучше не делать вовсе: тогда в шапке страницы
+ * не будет og:image, и Discord нарисует карточку без картинки, а не с пятном
+ * (см. injectPackMeta в src/meta/pack.js — там null это законный ответ).
+ *
+ * @param {string} logoFile имя файла в папке логотипов, например «511.jpg»
+ * @param {boolean} remake пересчитать, даже если готовая копия лежит и с виду
+ *   годна. Просит об этом тот, кто только что скачал оригинал заново
+ *   (см. fetchLogo в src/indexer/parse.js), и просит не зря: лежащая копия
+ *   вполне может быть растянутой из обложки карточки — так сборка делала
+ *   и делает, когда оригинала нет под рукой (см. previewPath
+ *   в scripts/build-web.js). Отличить такую копию от честной по самому файлу
+ *   нельзя — она те же 512×512 и тот же AVIF, — а вот пересчитать её из живого
+ *   оригинала можно всегда, и стоит это одного запуска ImageMagick.
+ * @returns {Promise<string|null>} путь к копии или null, если её нет и не будет
+ */
+export async function ensurePreview(logoFile, remake = false) {
+	const source = path.join(config.logosPath, logoFile);
+	const target = path.join(config.previewsPath, previewName(logoFile));
+	const ready = fs.existsSync(target);
+
+	// Формат проверяется тем же isAvif и по той же причине, что у обложки:
+	// шестой ImageMagick кладёт png под именем .avif и выходит с нулём
+	if (ready && !remake && (isAvif(target) || !fs.existsSync(source))) {
+		return target;
+	}
+
+	if (!fs.existsSync(source)) {
+		return ready ? target : null;
+	}
+
+	if (inFlight.has(target)) {
+		return inFlight.get(target);
+	}
+
+	const job = resizeInto(source, target, PREVIEW)
+		.then(done => (done || ready ? target : null))
+		.finally(() => inFlight.delete(target));
+
+	inFlight.set(target, job);
+	return job;
+}
+
+/** Есть ли у пака крупная копия. Спрашивает шаг логотипов — по ней он и чинит. */
+export const hasPreview = logoFile => Boolean(logoFile)
+	&& fs.existsSync(path.join(config.previewsPath, previewName(logoFile)));

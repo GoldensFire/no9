@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import {
-	ASSET, dbPath, force, MARK, prevPath, root, STAGE, TAG, thumbsPath, WORK,
+	ASSET, dbPath, force, MARK, prevPath, previewsPath, root, STAGE, TAG, thumbsPath, WORK,
 } from './config.js';
 
 /**
@@ -193,9 +193,31 @@ export function pack(file) {
 	const parts = ['data/sibase.db'];
 	const args = ['-czf', file, '-C', STAGE, 'data/sibase.db'];
 
+	// Второй «-C» уводит из STAGE обратно в корень проекта; третьего не нужно —
+	// оба склада лежат в одной папке data, и tar остаётся там же, куда его
+	// увели. Лишний «-C ../..» отсюда увёл бы на две ступени выше корня.
 	if (fs.existsSync(thumbsPath)) {
 		parts.push('data/thumbs');
 		args.push('-C', '../..', 'data/thumbs');
+	}
+
+	// Крупные копии для чужих окон — рядом с обложками и по той же причине:
+	// без них обход не может положить наверх картинку, которую Discord покажет
+	// в карточке ссылки (см. previewsPath в scripts/state/config.js).
+	//
+	// Своя проверка на существование, а не одна на обе папки: у того, кто ещё
+	// ни разу не собирал сайт, склад крупных копий пуст, а обложки уже есть, —
+	// и tar отказался бы от всего свёртка целиком из-за одной отсутствующей части.
+	if (fs.existsSync(previewsPath)) {
+		parts.push('data/previews');
+
+		// «-C» здесь не повторяется: если папка обложек нашлась, tar уже стоит
+		// в корне, а если не нашлась — увести его туда надо теперь.
+		if (!fs.existsSync(thumbsPath)) {
+			args.push('-C', '../..');
+		}
+
+		args.push('data/previews');
 	}
 
 	const result = run('tar', args);

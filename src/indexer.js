@@ -8,6 +8,8 @@
 //   node src/indexer.js --topics-only   только определить тематики через Gemini
 //   node src/indexer.js --summary-only  только составить краткие описания паков
 //   node src/indexer.js --logos         только докачать логотипы
+//   node src/indexer.js --refit         вместе с --logos: сходить в ВК и за теми обложками,
+//                                       чья уменьшенная копия лежит не в том формате (png под именем .avif)
 //   node src/indexer.js --specials      досчитать спецвопросы у старых паков
 //   node src/indexer.js --prints        снять отпечатки вопросов у старых паков (по ним ищется списанное)
 //   node src/indexer.js --durations    померить длительность медиафайлов (среднюю и самую большую)

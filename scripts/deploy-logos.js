@@ -12,9 +12,19 @@
 // вместе с уменьшенной копией в data/thumbs, и всё равно висел на сайте
 // квадратом с буквой, пока сайт не выложили руками.
 //
-// Здесь нужны ровно две вещи: папка data/thumbs, которая приезжает с полки
-// вместе с базой (см. scripts/state/shelf.js), и wrangler. Ни страниц,
-// ни стилей, ни кода Worker'а — потому эта команда и работает в Actions.
+// Здесь нужны ровно две вещи: папки data/thumbs и data/previews, которые
+// приезжают с полки вместе с базой (см. scripts/state/shelf.js), и wrangler.
+// Ни страниц, ни стилей, ни кода Worker'а — потому эта команда и работает
+// в Actions.
+//
+// Папок стало две, и это та же история во второй раз. Крупную копию — ту,
+// что уезжает в чужое окно карточкой ссылки, — возила статика главного
+// Worker'а, то есть только домашняя выкладка. Пак 21599 нашёлся обходом,
+// получил обложку на карточке в тот же час, а в Discord разворачивался
+// заголовком и пустым серым прямоугольником: картинки по /logos/preview/
+// наверху не было и взяться ей было неоткуда. Теперь обе копии считаются
+// при разборе пака (см. fetchLogo в src/indexer/parse.js), обе ездят
+// на полке и обе уезжают отсюда одной выкладкой.
 //
 // ————— почему это не стоит ни запроса —————
 //
@@ -27,19 +37,20 @@
 // пределе в сто тысяч. Кэш тут не помощник: ответ из кэша Worker'а считается
 // наравне с тем, ради которого Worker просыпался.
 //
-// Адрес обложки при этом не меняется: Worker стоит не на своём имени, а на
-// маршруте firepacks.net/logos/thumb/* — тот точнее, чем хост целиком, и потому
-// срабатывает раньше главного сайта (см. "routes" в cf/logos/wrangler.jsonc).
-// Значит, ни logoUrl в src/logo.js, ни ссылка из cf/src/library/packs.js,
-// ни og:image страницы пака трогать не пришлось.
+// Адреса картинок при этом не меняются: Worker стоит не на своём имени, а на
+// маршрутах firepacks.net/logos/thumb/* и /logos/preview/* — те точнее, чем хост
+// целиком, и потому срабатывают раньше главного сайта (см. "routes"
+// в cf/logos/wrangler.jsonc). Значит, ни logoUrl с previewUrl в src/logo.js,
+// ни ссылка из cf/src/library/packs.js, ни og:image страницы пака трогать
+// не пришлось.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { local, root, thumbsPath } from './deploy/options.js';
+import { local, previewsPath, root, thumbsPath } from './deploy/options.js';
 import { run, sleep } from './deploy/wrangler.js';
 import { siteOrigin } from './deploy/site.js';
-import { logoUrl } from '../src/logo.js';
+import { logoUrl, previewUrl } from '../src/logo.js';
 
 /**
  * Собрать папку и показать, что уехало бы, — не трогая ни Cloudflare, ни сайт.
@@ -73,7 +84,27 @@ const publicPath = path.join(root, 'cf', 'logos', 'public');
  * по /logos/thumb/21554.avif, обязана лежать в logos/thumb/21554.avif.
  * Отсюда и лишние две ступени вложенности — благодаря им адрес остался прежним.
  */
-const inside = folder => path.join(folder, 'logos', 'thumb');
+const inside = (folder, kind) => path.join(folder, 'logos', kind);
+
+/**
+ * Что этот Worker возит. Две картинки на пак, и обе обязаны ехать вместе.
+ *
+ * `thumb` — обложка карточки 144×144, её показывает сам сайт.
+ * `preview` — крупная копия 512×512, её показывает чужое окно, когда паком
+ * поделились ссылкой (см. previewName в src/logo.js).
+ *
+ * Прежде здесь была одна первая, а вторую возила статика главного Worker'а —
+ * то есть только домашняя выкладка. Пак, найденный ежечасным обходом, получал
+ * обложку на карточке через час, а картинку в Discord — никогда, пока сайт
+ * не выложат руками: ссылкой делились, и в чужом окне был пустой серый
+ * прямоугольник (пак 21599, сентябрь 2026). Теперь обе копии считаются при
+ * разборе пака (см. fetchLogo в src/indexer/parse.js) и обе ездят на полке,
+ * так что обходу есть что положить.
+ */
+const KINDS = [
+	{ kind: 'thumb', from: thumbsPath, name: 'обложки карточек' },
+	{ kind: 'preview', from: previewsPath, name: 'крупные копии для чужих окон' },
+];
 
 /** Статика главного Worker'а — куда обложки ложатся при --into-site. */
 const sitePath = path.join(root, 'cf', 'public');
@@ -110,10 +141,20 @@ const sitePath = path.join(root, 'cf', 'public');
  * из памяти — но ровно одно открытие, потому что тем же открытием уйдёт
  * и вопрос, а ответ на него уже будет настоящим. Против года, который
  * запоминался при immutable, это по-прежнему ничто.
+ *
+ * У крупных копий строка та же, слово в слово, и это не копипаста: правило
+ * у них одно и то же по существу — файл под этим адресом не меняется никогда
+ * (имя копии — это номер пака), а меняется только то, есть он или ещё нет.
+ * Прежде у них стоял голый max-age без приписки: правило жило в другом файле
+ * (scripts/build-web.js), и держать две половины одного правила в согласии
+ * было некому. Теперь обе едут отсюда.
  */
 const HEADERS = `# Собрано scripts/deploy-logos.js
 
 /logos/thumb/*
+  Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+/logos/preview/*
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
 `;
 
@@ -121,15 +162,19 @@ const HEADERS = `# Собрано scripts/deploy-logos.js
 const TRIES = [2, 3, 5, 10, 15];
 
 /**
- * Собрать папку заново. Именно заново, а не «дописать недостающее»: обложки
+ * Собрать папку заново. Именно заново, а не «дописать недостающее»: картинки
  * паков, которых в базе больше нет, сборка выметает со склада
  * (см. `swept` в scripts/build-web.js), и папка, которую только дополняют,
  * держала бы их наверху вечно.
  *
- * Копируем, а не переносим: data/thumbs — единственный склад, из него же берут
- * домашний сайт и полка.
+ * Копируем, а не переносим: data/thumbs и data/previews — единственные склады,
+ * из них же берут домашний сайт и полка.
  *
- * @returns {number} сколько обложек сложено
+ * Обе картинки складываются одним заходом и уезжают одной выкладкой — иначе
+ * между ними снова завёлся бы разрыв, из-за которого всё это и переписывалось
+ * (см. KINDS выше).
+ *
+ * @returns {{total: number, counts: Record<string, number>}} сколько чего сложено
  */
 function collect(folder) {
 	// Сносим только свою папку: cf/public собирает и вычищает
@@ -138,30 +183,44 @@ function collect(folder) {
 		fs.rmSync(folder, { recursive: true, force: true });
 	}
 
-	fs.mkdirSync(inside(folder), { recursive: true });
-
 	// Правило кэша — тоже только своей: в cf/public лежит свой _headers,
 	// собранный scripts/build-web.js, и затирать его отсюда было бы разбоем.
-	// Обложкам там оно и не нужно — их отдаёт не эта папка, а Worker выше.
+	// Картинкам там оно и не нужно — их отдаёт не эта папка, а Worker выше.
 	if (folder === publicPath) {
+		fs.mkdirSync(folder, { recursive: true });
 		fs.writeFileSync(path.join(folder, '_headers'), HEADERS, 'utf8');
 	}
 
-	// Только .avif, и не из брезгливости: имя копии оканчивается на .avif
-	// (см. thumbName в src/logo.js), а всё прочее в этой папке — обрезки
-	// от оборвавшегося уменьшения (.tmp-…, см. resizeInto в src/thumbs.js).
-	const names = fs.readdirSync(thumbsPath).filter(name => name.endsWith('.avif'));
+	const counts = {};
+	let total = 0;
 
-	for (const name of names) {
-		fs.copyFileSync(path.join(thumbsPath, name), path.join(inside(folder), name));
+	for (const { kind, from } of KINDS) {
+		fs.mkdirSync(inside(folder, kind), { recursive: true });
+
+		// Склада может не быть вовсе — так выглядит машина, на которой ещё
+		// ни разу не разбирали паки. Пустая папка при этом заводится: без неё
+		// адреса этого вида отдавали бы 404 от статики вместо честного "no-store"
+		// из "main" (см. cf/logos/src/index.js).
+		if (!fs.existsSync(from)) {
+			counts[kind] = 0;
+			continue;
+		}
+
+		// Только .avif, и не из брезгливости: имя копии оканчивается на .avif
+		// (см. thumbName и previewName в src/logo.js), а всё прочее в этой
+		// папке — обрезки от оборвавшегося уменьшения (.tmp-…, см. resizeInto
+		// в src/thumbs.js).
+		const names = fs.readdirSync(from).filter(name => name.endsWith('.avif'));
+
+		for (const name of names) {
+			fs.copyFileSync(path.join(from, name), path.join(inside(folder, kind), name));
+		}
+
+		counts[kind] = names.length;
+		total += names.length;
 	}
 
-	// Крупных копий для чужих окон здесь нет и быть не должно: их собирает
-	// сборка сайта и увозит статика главного Worker'а (см. previewPath
-	// в scripts/build-web.js). Ночной обход сайт не собирает — а эта команда
-	// работает и в нём, и папку она переписывает целиком: возьмись она возить
-	// ещё и крупные копии, ночь сносила бы наверху те, которых у неё нет.
-	return names.length;
+	return { total, counts };
 }
 
 /**
@@ -194,22 +253,30 @@ function newest(names) {
 }
 
 /**
- * Спросить сайт, отдаётся ли обложка. Не «команда прошла», а «картинка видна»:
+ * Спросить сайт, отдаётся ли картинка. Не «команда прошла», а «картинка видна»:
  * между выложенным Worker'ом и работающим маршрутом есть разница, и заметить
  * её должны мы, а не посетитель.
  *
  * Отвечает на вопрос «маршрут вообще стоит?» — а он один на все три тысячи
- * обложек, поэтому и хватает одной.
+ * картинок этого вида, поэтому и хватает одной.
+ *
+ * Спрашивается теперь про оба вида, и это не перестраховка: маршрутов
+ * у Worker'а тоже два, и встать они могут порознь. Промолчи мы про второй —
+ * вышло бы ровно то, с чего всё начиналось: обложки на карточках есть,
+ * а в Discord пустой прямоугольник, и узнаётся об этом от посетителя.
+ *
+ * @param {string} kind «thumb» или «preview» — для строки про маршрут
+ * @param {(name: string) => string} link чем строится адрес: logoUrl или previewUrl
  */
-async function visible(name) {
+async function visible(kind, link, name) {
 	const origin = await siteOrigin();
 
 	if (!origin) {
-		console.log('Адрес сайта не спросился — проверить обложку нечем.');
+		console.log('Адрес сайта не спросился — проверить картинку нечем.');
 		return true;
 	}
 
-	const address = `${origin}${logoUrl(name)}`;
+	const address = `${origin}${link(name)}`;
 
 	for (let attempt = 0; ; attempt += 1) {
 		let complaint;
@@ -218,7 +285,7 @@ async function visible(name) {
 			const response = await fetch(address, { method: 'HEAD', headers: { 'Cache-Control': 'no-cache' } });
 
 			if (response.ok) {
-				console.log(`Обложки на месте: ${address}`);
+				console.log(`На месте: ${address}`);
 				return true;
 			}
 
@@ -229,9 +296,9 @@ async function visible(name) {
 
 		if (attempt === TRIES.length) {
 			console.error('');
-			console.error(`Обложка не отдаётся (${complaint}): ${address}`);
+			console.error(`Картинка не отдаётся (${complaint}): ${address}`);
 			console.error('');
-			console.error('Worker выложен, значит дело в маршруте: /logos/thumb/* на firepacks.net');
+			console.error(`Worker выложен, значит дело в маршруте: /logos/${kind}/* на firepacks.net`);
 			console.error('должен вести на firepacks-logos. Посмотреть, что там стоит:');
 			console.error('  npx wrangler deployments list -c cf/logos/wrangler.jsonc');
 			console.error('Если маршрута нет, а сам Worker есть — у ключа Cloudflare не хватает');
@@ -241,32 +308,50 @@ async function visible(name) {
 		}
 
 		const wait = TRIES[attempt];
-		console.log(`Обложка ещё не отдаётся (${complaint}) — ждём ${wait} с и пробуем снова.`);
+		console.log(`Ещё не отдаётся (${complaint}) — ждём ${wait} с и пробуем снова.`);
 		sleep(wait);
 	}
 }
 
 async function main() {
+	// Спрашиваем про склад обложек, а не про оба: без него выкладывать нечего
+	// в самом деле — это картинки, которые видны на самом сайте. Склад крупных
+	// копий может отставать (он завёлся позже) или быть пустым, и это не повод
+	// не везти обложки.
 	if (!fs.existsSync(thumbsPath)) {
 		console.log('Склада обложек нет (data/thumbs) — выкладывать нечего.');
 		return;
 	}
 
 	const folder = intoSite ? sitePath : publicPath;
-	const count = collect(folder);
+	const { total, counts } = collect(folder);
 
-	if (count === 0) {
-		console.log('На складе нет ни одной обложки — выкладывать нечего.');
+	if (total === 0) {
+		console.log('На складе нет ни одной картинки — выкладывать нечего.');
 		return;
 	}
 
-	const weight = fs.readdirSync(inside(folder))
-		.reduce((sum, name) => sum + fs.statSync(path.join(inside(folder), name)).size, 0);
+	for (const { kind, name } of KINDS) {
+		const at = inside(folder, kind);
+		const weight = fs.readdirSync(at)
+			.reduce((sum, file) => sum + fs.statSync(path.join(at, file)).size, 0);
 
-	console.log(`Обложек: ${count} (${(weight / 1024 / 1024).toFixed(1)} МБ).`);
+		console.log(`  ${name}: ${counts[kind]} (${(weight / 1024 / 1024).toFixed(1)} МБ)`);
+	}
+
+	// Крупных копий меньше, чем обложек, — значит, часть паков делится ссылкой
+	// без картинки. Это не поломка выкладки, а незаконченная починка склада:
+	// такие паки разобраны до того, как крупная копия стала считаться при
+	// разборе, и оригинала у них давно нет (см. picturesFit в src/indexer/parse.js).
+	if (counts.preview < counts.thumb) {
+		const behind = counts.thumb - counts.preview;
+		console.log(`\nУ ${behind} пак(ов) нет крупной копии — ссылка на них развернётся`);
+		console.log('в чужом окне заголовком без картинки. Догнать (один раз, с походом в ВК):');
+		console.log('  node src/indexer.js --logos --refit');
+	}
 
 	if (intoSite) {
-		console.log('Обложки положены в статику главного Worker\'а (cf/public) — своим Worker\'ом не отправляем.');
+		console.log('\nКартинки положены в статику главного Worker\'а (cf/public) — своим Worker\'ом не отправляем.');
 		return;
 	}
 
@@ -281,9 +366,30 @@ async function main() {
 		return;
 	}
 
-	const check = newest(fs.readdirSync(thumbsPath).filter(name => name.endsWith('.avif')));
+	// Проверяем оба маршрута, и каждый — своим самым поздним файлом. Склады
+	// могут расходиться (крупная копия есть не у всякого пака), поэтому «самый
+	// поздний» считается по каждому отдельно, а не берётся один на двоих:
+	// спросив про пак, крупной копии у которого нет и не было, мы получили бы
+	// честный 404 и решили, что сломан маршрут.
+	let allThere = true;
 
-	if (!await visible(check)) {
+	for (const { kind, from } of KINDS) {
+		if (!fs.existsSync(from)) {
+			continue;
+		}
+
+		const check = newest(fs.readdirSync(from).filter(name => name.endsWith('.avif')));
+
+		if (!check) {
+			continue;
+		}
+
+		if (!await visible(kind, kind === 'thumb' ? logoUrl : previewUrl, check)) {
+			allThere = false;
+		}
+	}
+
+	if (!allThere) {
 		process.exit(1);
 	}
 }

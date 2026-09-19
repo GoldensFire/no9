@@ -16,9 +16,9 @@ import { db, authorsOrVk, buildMatchKey, saveAuthors } from '../db.js';
 import { openRemoteZip, DeadLinkError } from '../zip.js';
 import { isObsceneName } from '../obscene.js';
 import { parseContentXml } from '../siq.js';
-import { ensureThumb, isAvif } from '../thumbs.js';
+import { ensurePreview, ensureThumb, hasPreview, isAvif } from '../thumbs.js';
 import { thumbName } from '../logo.js';
-import { force, jobs, reparse, retryFailed } from './options.js';
+import { force, jobs, refit, reparse, retryFailed } from './options.js';
 import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
 import { say } from './progress.js';
 import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
@@ -38,24 +38,46 @@ export const hasThumb = logoFile => Boolean(logoFile)
 const hasOriginal = logoFile => Boolean(logoFile) && fs.existsSync(path.join(config.logosPath, logoFile));
 
 /**
- * Годится ли то, что лежит на складе копий.
+ * Годится ли то, что лежит на складах картинок.
  *
- * Не «есть файл», а «есть картинка того формата, под именем которого она лежит».
- * Разница появилась вместе с машиной Actions: тамошний ImageMagick AVIF читает,
- * но не пишет, и на просьбу сделать .avif молча кладёт исходный png или jpg
- * под этим именем (см. isAvif в src/thumbs.js). Такая копия на сайте
- * показывается — но весит впятеро больше обещанного, а Content-Type врёт.
+ * Складов два, и спрашивается про оба: обложка карточки 144×144 (data/thumbs)
+ * и крупная копия 512×512 для чужого окна (data/previews). Обе делаются
+ * из одного оригинала и в одну минуту (см. fetchLogo ниже), поэтому и ответ
+ * про них один.
  *
- * Негодной она признаётся только при живом оригинале: переделать его — секунда
- * и ни одного похода в ВК. Нет оригинала — считаем годной и не трогаем: тащить
- * из ВК три тысячи паков ради веса страницы никто не просил.
+ * Про обложку вопрос не «есть файл», а «есть картинка того формата, под именем
+ * которого она лежит». Разница появилась вместе с машиной Actions: тамошний
+ * ImageMagick AVIF читает, но не пишет, и на просьбу сделать .avif молча кладёт
+ * исходный png или jpg под этим именем (см. isAvif в src/thumbs.js). Такая
+ * копия на сайте показывается — но весит вдвое с лишним больше обещанного,
+ * а Content-Type под ней врёт.
+ *
+ * Обычно негодной она признаётся только при живом оригинале: переделать его —
+ * секунда и ни одного похода в ВК. Нет оригинала — считаем годной и не трогаем:
+ * тащить из ВК полторы тысячи паков ради веса страницы ночь не должна.
+ *
+ * `--refit` эту оговорку снимает и добавляет второй вопрос — про крупную копию.
+ * Оба они про уже накопленное: копии не того формата и паки, разобранные до
+ * того, как крупная копия стала считаться при разборе. Почему это ключ, а не
+ * всегдашнее правило, написано в шапке ключа (см. refit в src/indexer/options.js).
  */
-const thumbFits = (logoFile) => {
+const picturesFit = (logoFile) => {
 	if (!hasThumb(logoFile)) {
 		return false;
 	}
 
-	return isAvif(path.join(config.thumbsPath, thumbName(logoFile))) || !hasOriginal(logoFile);
+	// Крупной копии нет, а оригинал давно унёс с собой одноразовый раннер —
+	// значит, картинки в чужом окне у пака не будет, пока за оригиналом
+	// не сходят заново. Спрашиваем только при --refit: у ночи своя работа
+	if (refit && !hasPreview(logoFile)) {
+		return false;
+	}
+
+	if (isAvif(path.join(config.thumbsPath, thumbName(logoFile)))) {
+		return true;
+	}
+
+	return refit ? false : !hasOriginal(logoFile);
 };
 
 /**
@@ -116,6 +138,25 @@ async function fetchLogo(archive, logoName, packageId) {
 	fs.writeFileSync(path.join(config.logosPath, fileName), content);
 
 	const thumb = await ensureThumb(fileName).catch(() => null);
+
+	// И крупная копия — та, что уезжает в чужое окно карточкой ссылки. Здесь же
+	// и сразу, по той же причине, по которой здесь считается обложка карточки:
+	// оригинал под рукой только в эту минуту (см. ensurePreview в src/thumbs.js).
+	// Прежде её делала одна лишь сборка сайта, и у пака, найденного обходом,
+	// картинки в Discord не появлялось до ближайшей выкладки руками — то есть
+	// у свежих паков её не было вовсе.
+	//
+	// Не получилось — это не ошибка и не повод ронять логотип: на карточке пак
+	// покажется, а в чужом окне будет заголовок без картинки. Обложка карточки
+	// важнее, и отвечает эта функция по-прежнему про неё.
+	//
+	// remake: пересчитать, даже если копия уже лежит. Оригинал мы только что
+	// скачали, а лежащая копия вполне может быть растянутой из обложки карточки
+	// 144×144 — так сборка делает, когда оригинала под рукой нет, и так вышло
+	// у 1752 копий из 3111. Отличить её от честной по файлу нельзя, а пересчёт
+	// из живого оригинала стоит одного запуска ImageMagick. Ровно на этом
+	// и чинится мыло в чужом окне у старых паков.
+	await ensurePreview(fileName, true).catch(() => null);
 
 	return { file: fileName, state: 'ok', shown: Boolean(thumb) };
 }
@@ -336,14 +377,21 @@ export async function fetchLogos() {
 	 */
 	const wanted = () => (force
 		? pending.all(...params)
-		: pending.all(...params).filter(row => row.logo_state !== 'ok' || !thumbFits(row.logo_file)));
+		: pending.all(...params).filter(row => row.logo_state !== 'ok' || !picturesFit(row.logo_file)));
 
 	const queue = wanted();
 	const broken = queue.filter(row => row.logo_state === 'ok').length;
 	const athand = queue.filter(row => row.logo_state === 'ok' && hasOriginal(row.logo_file)).length;
+	// Копия есть, но не того формата: такие набираются только с ключом --refit,
+	// и говорить про них надо отдельно — «потерянная обложка» про них неправда,
+	// на карточке они как раз показываются (см. picturesFit выше)
+	const unfit = refit
+		? queue.filter(row => row.logo_state === 'ok' && hasThumb(row.logo_file)).length
+		: 0;
 
 	say('logos', `без логотипа ${queue.length - broken}`
-		+ `${broken ? `, с потерянной обложкой ${broken}` : ''}`
+		+ `${broken - unfit > 0 ? `, с потерянной обложкой ${broken - unfit}` : ''}`
+		+ `${unfit ? `, с копией не того формата ${unfit}` : ''}`
 		+ `${athand ? ` (из них ${athand} чинятся без сети: оригинал на месте)` : ''}`
 		+ `${queueNote(false)}${jobs > 1 ? `, по ${jobs} разом` : ''}`);
 
@@ -358,13 +406,18 @@ export async function fetchLogos() {
 		jobs,
 		take: wanted,
 		work: async (row, bar) => {
-			// Оригинал на месте — значит, потерялась одна копия, и делается она
-			// здесь же, без единого обращения к ВК. Не вышло и так — идём в сеть:
-			// может, дело в самом файле, и перекачанный окажется целее
+			// Оригинал на месте — значит, потерялась какая-то из копий, и делаются
+			// они здесь же, без единого обращения к ВК. Не вышло и так — идём
+			// в сеть: может, дело в самом файле, и перекачанный окажется целее
 			if (!force && row.logo_state === 'ok' && hasOriginal(row.logo_file)) {
 				const thumb = await ensureThumb(row.logo_file).catch(() => null);
 
-				if (thumb && thumbFits(row.logo_file)) {
+				// Крупная копия — тем же заходом: обе они из одного оригинала,
+				// и разводить их по разным местам значило бы дважды спрашивать
+				// про один и тот же файл (см. ensurePreview в src/thumbs.js)
+				await ensurePreview(row.logo_file).catch(() => null);
+
+				if (thumb && picturesFit(row.logo_file)) {
 					mended++;
 					return;
 				}

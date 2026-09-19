@@ -128,6 +128,11 @@ function logos() {
 	console.error('');
 	console.error('Кладём их в статику главного Worker\'а — он сейчас поедет наверх и увезёт');
 	console.error('их с собой, как возил до появления отдельного Worker\'а обложек.');
+	console.error('');
+	console.error('Сработает это, только если Worker обложек не выкладывался ни разу:');
+	console.error('маршруты /logos/thumb/* и /logos/preview/* от прошлой удачной выкладки');
+	console.error('никуда не делись и по-прежнему ведут на него, мимо статики главного.');
+	console.error('Тогда наверху остаются картинки с прошлого раза — не новые, но и не пустота.');
 
 	run('node', ['--no-warnings', 'scripts/deploy-logos.js', '--into-site'], { soft: true });
 }

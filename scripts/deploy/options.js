@@ -25,6 +25,16 @@ export const dataPath = path.join(root, 'cf', 'data');
  */
 export const thumbsPath = path.join(root, 'data', 'thumbs');
 
+/**
+ * Склад крупных копий — тех, что уезжают в чужое окно карточкой ссылки.
+ * Считается здесь по той же причине и берётся тем же scripts/deploy-logos.js:
+ * обе копии теперь едут наверх одним Worker'ом и одной командой.
+ *
+ * До этого крупные копии возила статика главного Worker'а, то есть только
+ * домашняя выкладка, — и у пака, найденного обходом между двумя выкладками,
+ * картинки в Discord не было вовсе (пак 21599, сентябрь 2026).
+ */
+export const previewsPath = path.join(root, 'data', 'previews');
 
 export const local = process.argv.includes('--local');
 
