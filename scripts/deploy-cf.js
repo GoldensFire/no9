@@ -53,6 +53,7 @@ import { pour } from './deploy/d1.js';
 import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
 import { pingIndexNow } from './deploy/indexnow.js';
+import { recrawl } from './recrawl.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
 
 /**
@@ -259,6 +260,13 @@ async function main() {
 	// а не после: отметка «эти адреса отправлены» ложится в домашнюю базу,
 	// и уехать на полку она должна вместе со всем остальным.
 	await pingIndexNow();
+
+	// И следом — переобход в Яндексе. Дело у него соседнее, но другое: IndexNow
+	// говорит «вот это только что изменилось», а переобход тратит суточную квоту
+	// на страницы, до которых робот не дошёл вовсе (см. scripts/recrawl.js).
+	// Своего задания в планировщике ему не нужно — ночной обход ходит каждые
+	// сутки, а квота Вебмастера тоже суточная и не копится.
+	await recrawl();
 
 	if (toShelf) {
 		shelve();

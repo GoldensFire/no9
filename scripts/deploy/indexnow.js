@@ -135,15 +135,24 @@ async function sitemapUrls(origin) {
 	// только базой (см. dbOnly в options.js), а IndexNow стоит после неё.
 	const { buildSitemap } = await import('../../src/meta/sitemap.js');
 	const { TOPIC_PAGE_KEYS, subjectPages } = await import('../../src/meta/sections.js');
-	const { listSitemap, listSubjectGroups, getFacets } = await import('../../cf/src/library/pages.js');
+	const {
+		listSitemap, listSubjectGroups, getFacets, getLandingPages, listAuthorPages,
+	} = await import('../../cf/src/library/pages.js');
 
 	const db = remoteDatabase();
-	const [rows, groups] = await Promise.all([listSitemap(db), listSubjectGroups(db)]);
-	const facets = await getFacets(db);
+	const assets = builtAssets();
+	const [rows, groups] = await Promise.all([listSitemap(db), listSubjectGroups(db, assets, ASSET_BASE)]);
+	const facets = await getFacets(db, assets, ASSET_BASE);
+	const [pages, authors] = await Promise.all([
+		getLandingPages(assets, ASSET_BASE),
+		listAuthorPages(assets, ASSET_BASE),
+	]);
 
 	const xml = buildSitemap(rows, origin, {
 		topics: TOPIC_PAGE_KEYS.filter(key => (facets.topics?.[key] ?? 0) > 0),
 		subjects: subjectPages(groups),
+		pages,
+		authors,
 	});
 
 	const found = [];
@@ -157,6 +166,43 @@ async function sitemapUrls(origin) {
 	}
 
 	return found;
+}
+
+/**
+ * Адрес, от которого спрашивается статика. Настоящий здесь не нужен и не важен:
+ * ниже по нему берётся один только путь, — но сами функции Worker'а без него
+ * не работают, и придумывать им особый способ вызова незачем.
+ */
+const ASSET_BASE = 'https://localhost/';
+
+/**
+ * Статика, притворяющаяся той, что подаёт Worker'у Cloudflare.
+ *
+ * Нужна ровно за одним файлом — `prebuilt.json`, готовыми ответами, посчитанными
+ * при сборке (см. cf/src/prebuilt.js). В нём лежат страницы авторов и число
+ * страниц у каждого раздела, а без них карта, собранная здесь, выходила короче
+ * настоящей: не хватало пяти сотен страниц авторов и полутора тысяч вторых
+ * и дальше страниц разделов.
+ *
+ * Недостача эта была тихой и заметной только со стороны. Bing в отчёте писал,
+ * что часть важных страниц сайт через IndexNow не отправлял, и был прав: в карте
+ * сайта они есть, ссылки на них есть, а пинга про них не уходило никогда.
+ *
+ * Файла нет — возвращаем «не нашлось», и карта собирается как раньше, без них:
+ * между выкладкой Worker'а и выкладкой статики так и бывает (см. prebuilt).
+ */
+function builtAssets() {
+	return {
+		fetch: async address => {
+			const file = path.join(root, 'cf', 'public', new URL(address).pathname.replace(/^\//, ''));
+
+			if (!fs.existsSync(file)) {
+				return { ok: false, json: async () => null };
+			}
+
+			return { ok: true, json: async () => JSON.parse(fs.readFileSync(file, 'utf8')) };
+		},
+	};
 }
 
 /**

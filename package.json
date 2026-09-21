@@ -25,6 +25,8 @@
     "cf:dev": "node --no-warnings scripts/deploy-cf.js --local && wrangler dev",
     "cf:db": "node --no-warnings scripts/deploy-cf.js --db-only",
     "deploy": "node --no-warnings scripts/deploy-cf.js",
+    "recrawl": "node --no-warnings scripts/recrawl.js",
+    "recrawl:dry": "node --no-warnings scripts/recrawl.js --dry",
     "deploy:logos": "node --no-warnings scripts/deploy-logos.js"
   },
   "engines": {
