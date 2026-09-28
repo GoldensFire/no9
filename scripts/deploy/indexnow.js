@@ -136,15 +136,16 @@ async function sitemapUrls(origin) {
 	const { buildSitemap } = await import('../../src/meta/sitemap.js');
 	const { TOPIC_PAGE_KEYS, subjectPages } = await import('../../src/meta/sections.js');
 	const {
-		listSitemap, listSubjectGroups, getFacets, getLandingPages, listAuthorPages,
+		listSitemap, listSubjectGroups, getFacets, getLandingPages, getLandingNewest, listAuthorPages,
 	} = await import('../../cf/src/library/pages.js');
 
 	const db = remoteDatabase();
 	const assets = builtAssets();
 	const [rows, groups] = await Promise.all([listSitemap(db), listSubjectGroups(db, assets, ASSET_BASE)]);
 	const facets = await getFacets(db, assets, ASSET_BASE);
-	const [pages, authors] = await Promise.all([
+	const [pages, newest, authors] = await Promise.all([
 		getLandingPages(assets, ASSET_BASE),
+		getLandingNewest(assets, ASSET_BASE),
 		listAuthorPages(assets, ASSET_BASE),
 	]);
 
@@ -152,6 +153,7 @@ async function sitemapUrls(origin) {
 		topics: TOPIC_PAGE_KEYS.filter(key => (facets.topics?.[key] ?? 0) > 0),
 		subjects: subjectPages(groups),
 		pages,
+		newest,
 		authors,
 	});
 
@@ -232,6 +234,15 @@ function sentBefore(db) {
 }
 
 /**
+ * Вторая и дальше страница раздела: хвост адреса — номер. Пак сюда не попадает,
+ * даже когда названия у него нет и адрес кончается номером (/pack/10043).
+ */
+function isContinuation(url) {
+	const { pathname } = new URL(url);
+	return !pathname.startsWith('/pack/') && /\/\d+$/.test(pathname);
+}
+
+/**
  * Сказать поисковикам, что на сайте изменилось.
  *
  * Отправляется не всё подряд, а только новое и изменившееся: первый запуск
@@ -274,7 +285,14 @@ export async function pingIndexNow() {
 
 	try {
 		const known = sentBefore(db);
-		const all = await sitemapUrls(origin);
+
+		// Вторые и дальше страницы разделов (/topic/mixed/37, /for/history/12)
+		// в пинг не идут вовсе. Это продолжение раздела, а не сам раздел: новый
+		// пак сдвигает их все разом, и сообщать о каждой значит перечислять
+		// поисковику полтысячи адресов за выкладку. Bing называет это «пакетным
+		// режимом» и советует от него отказаться (сентябрь 2026). В карте сайта
+		// они остаются — оттуда робот их и возьмёт.
+		const all = (await sitemapUrls(origin)).filter(item => !isContinuation(item.url));
 
 		// Свежее вперёд: если адресов больше, чем протокол берёт за раз,
 		// уехать должны новые паки, а не хвост позапрошлого года
