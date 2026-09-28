@@ -45,7 +45,9 @@
 // не по времени, а по суточной квоте Gemini. Поэтому подмена базы её больше
 // не выбрасывает, а переносит, и отправка на полку — не затирает, а сливает.
 // Правило в обе стороны одно: у кого разметка свежее, того и ответ, кто бы
-// её ни сделал (см. MARKUP, carryMarkup и mergeShelf ниже).
+// её ни сделал (см. MARKUP, carryMarkup и mergeShelf ниже). Так же сливается
+// и память об отправленном поисковикам: переобход в Яндексе шлют и ночь,
+// и эта машина (см. SENT и carrySent).
 //
 // Всё остальное по-прежнему решает полка целиком: строки паков, статистика,
 // авторы, отметка о выгрузке. Спорить тут не о чем — их собирает обход
@@ -70,7 +72,7 @@ import {
 	assetId, contentOf, haveGh, localStamp, megabytes, pack, readMark,
 	remoteAsset, requireGh, run, unpack, when, writeMark,
 } from './state/shelf.js';
-import { carryMarkup, carryPersonal, mergeShelf, sayCarried } from './state/carry.js';
+import { carryMarkup, carryPersonal, carrySent, mergeShelf, sayCarried } from './state/carry.js';
 
 function showStatus() {
 	const here = localStamp();
@@ -120,6 +122,10 @@ function pull() {
 	// того и ответ (см. MARKUP). Без этой строки всякая сверка выбрасывала бы
 	// всё, что здесь размечено с прошлого раза, — молча и целиком.
 	sayCarried(carryMarkup(prevPath, dbPath), 'из здешней базы');
+
+	// Так же и с тем, что здесь отправили поисковикам: переобход шлёт Яндексу
+	// и ночь, и эта машина, и приехавшая база здешнего не знает (см. SENT)
+	carrySent(prevPath, dbPath);
 
 	writeMark(there);
 

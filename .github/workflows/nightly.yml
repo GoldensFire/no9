@@ -161,6 +161,9 @@ jobs:
       #   без ВК и Gemini обход просто беднее — обсуждения читаются разбором
       #   страниц, разметка новых паков откладывается до следующего раза;
       #
+      #   без ключа Вебмастера не будет переобхода в Яндексе: суточные сто
+      #   пятьдесят адресов сгорят, но ни база, ни сайт этого не заметят;
+      #
       #   без ключей Cloudflare не будет выкладки, но собранное не пропадёт:
       #   база уедет на полку, а заливка ведётся не «всё заново каждую ночь»,
       #   а по отпечаткам строк — и первая же удачная выкладка увезёт наверх
@@ -172,11 +175,12 @@ jobs:
         env:
           VK_TOKEN: ${{ secrets.VK_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YANDEX_WEBMASTER_TOKEN: ${{ secrets.YANDEX_WEBMASTER_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DEPLOY: ${{ inputs.deploy }}
         run: |
-          for name in VK_TOKEN GEMINI_API_KEY; do
+          for name in VK_TOKEN GEMINI_API_KEY YANDEX_WEBMASTER_TOKEN; do
             eval "value=\${$name}"
             if [ -z "$value" ]; then echo "::warning::Ключа $name нет — обход пойдёт без него"; fi
           done
@@ -242,6 +246,31 @@ jobs:
           if [ -n "$MINUTES" ]; then args="$args --minutes=$MINUTES"; fi
           if [ "$DEPLOY" != "true" ]; then args="$args --no-deploy"; fi
           node --no-warnings scripts/nightly.js $args
+
+      # Переобход в Яндексе: каждые сутки назвать Вебмастеру сто пятьдесят
+      # адресов, которые стоит перечитать (см. scripts/recrawl.js).
+      #
+      # Своим шагом, а не внутри выкладки, и это правка по живому случаю. Дома
+      # переобход идёт последним ходом `npm run deploy`, сразу за IndexNow, —
+      # а здесь выкладка «только база» (dbOnly в scripts/deploy/options.js)
+      # кончается раньше, и до переобхода ночь не доходила ни разу. С 21 по
+      # 28 сентября 2026 квота тратилась только в дни домашних выкладок —
+      # четыре дня из восьми; в остальные сто пятьдесят адресов сгорали,
+      # копить их Вебмастер не даёт.
+      #
+      # Сама выкладка переобходу не нужна: адреса он берёт из уже выложенной
+      # карты сайта по HTTP. Поэтому идёт он и тогда, когда выкладки не было
+      # или она сорвалась, — лишь бы приехала база: в ней память о том, что
+      # уже отправлено (recrawl_sent), и на полку эта память должна уехать
+      # вместе с ней. Отсюда и место шага — до полки. Сорвался сам — ночь
+      # не роняет.
+      - name: Переобход в Яндексе
+        if: ${{ !cancelled() && steps.state.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          YANDEX_WEBMASTER_TOKEN: ${{ secrets.YANDEX_WEBMASTER_TOKEN }}
+        run: node --no-warnings scripts/recrawl.js
 
       # Кладём базу обратно в любом случае — даже если обход оборвался на середине.
       # Разобранное до обрыва — это работа, которую не надо делать заново; а вот

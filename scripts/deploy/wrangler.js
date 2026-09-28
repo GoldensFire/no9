@@ -322,6 +322,10 @@ export function writeDevVars() {
 		['DISCORD_CLIENT_ID', 'discord-client-id.txt'],
 		['DISCORD_CLIENT_SECRET', 'discord-client-secret.txt'],
 		['VK_CLIENT_ID', 'vk-client-id.txt'],
+		// Привязка сообщением в сообщество (см. cf/src/auth/vk-community.js)
+		['VK_GROUP_TOKEN', 'vk-group-token.txt'],
+		['VK_CALLBACK_CONFIRM', 'vk-callback-confirm.txt'],
+		['VK_CALLBACK_SECRET', 'vk-callback-secret.txt'],
 	]
 		.map(([name, file]) => [name, readSecret(name, file)])
 		.filter(([, value]) => value);

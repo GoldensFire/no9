@@ -10,7 +10,7 @@ import { OFFSITE_SHARE_SQL } from '../keys.js';
 import { CYRILLIC_LANGS, langKey, languageByThemes } from '../language.js';
 import { toLevel } from '../stats.js';
 import { toPrimary } from '../topics.js';
-import { isCategoryName } from '../franchise.js';
+import { cleanArea, isCategoryName, isFormatMarker } from '../franchise.js';
 import { say } from './progress.js';
 import { targetSql } from './queue.js';
 
@@ -138,7 +138,16 @@ function recalcTopics() {
 		// «произведение») появился не сразу, и у записей постарше его нет вовсе;
 		// а главное — модель кладёт «Games» и «Movies» в оба поля одинаково,
 		// и произведением такое не становится (см. isCategoryName в franchise.js)
-		const shrunk = stored.filter(f => !isCategoryName(f.name));
+		//
+		// Формат тоже снимается здесь: при счёте по темам он и так не прошёл бы
+		// (см. countNamed в topics.js), а в сохранённом лежит от прежних правил —
+		// «Anime openings», «Covers». Область же переводится тем же словарём,
+		// что и свежий ответ модели (см. cleanArea): «Art» → «Искусство»
+		const shrunk = stored
+			.filter(f => !isCategoryName(f.name) && !isFormatMarker(f.name))
+			.map(f => (f.kind === 'area' && cleanArea(f.name) && cleanArea(f.name) !== f.name
+				? { ...f, name: cleanArea(f.name) }
+				: f));
 		const kept = shrunk.map(f => wholePack(row, f));
 
 		// Доля повторов сверяется со списком всегда, а не только когда список

@@ -64,6 +64,26 @@ CREATE TABLE IF NOT EXISTS user_vk (
 
 CREATE INDEX IF NOT EXISTS ix_user_vk_user ON user_vk (user_id);
 
+-- Заявки на привязку страницы ВК сообщением в сообщество FirePacks
+-- (см. cf/src/auth/vk-community.js). Одна строка — один выданный код: кому
+-- выдан, до какой поры годен и чем кончился. vk_id и done_at заполняет приход
+-- сообщения с этим кодом; error — отказ (страница уже чья-то).
+--
+-- Живут строки минуты: новая заявка того же человека стирает прежние,
+-- а заодно уходит всё, что старше суток. Ничего, кроме номера страницы,
+-- здесь нет — текст сообщений сайт не хранит.
+CREATE TABLE IF NOT EXISTS vk_claims (
+	code TEXT PRIMARY KEY,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	created_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	vk_id TEXT,
+	done_at INTEGER,
+	error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_vk_claims_user ON vk_claims (user_id);
+
 -- Входы. В базе лежит не сам ключ из куки, а его хеш: утёкшая база не должна
 -- давать возможности войти чужим именем.
 CREATE TABLE IF NOT EXISTS sessions (
@@ -520,6 +540,31 @@ CREATE TABLE IF NOT EXISTS user_settings (
 	updated_at INTEGER NOT NULL
 );
 
+
+-- ————— заказы паков —————
+--
+-- Доска «Заказать пак»: человек пишет, какой пак ему нужен и сколько он готов
+-- за него заплатить, а авторы откликаются по его ссылке на контакты. Сам сайт
+-- в сделке не участвует — ни денег, ни переписки здесь нет, только объявление
+-- (см. cf/src/library/orders.js).
+--
+-- topic — ключ типа пака из тех, что есть на сайте (mixed, anime, …, misc;
+-- см. TOPICS и EXTRA_TOPICS в src/names.js). price — рубли, целым числом.
+-- Снятый заказ стирается строкой, а не помечается: хранить его незачем.
+CREATE TABLE IF NOT EXISTS pack_orders (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	title TEXT NOT NULL,
+	topic TEXT NOT NULL,
+	price INTEGER NOT NULL,
+	description TEXT NOT NULL,
+	contact TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);
+
+-- Доска читается от свежих к старым, а свои заказы считаются перед новым
+CREATE INDEX IF NOT EXISTS ix_pack_orders_created ON pack_orders (created_at);
+CREATE INDEX IF NOT EXISTS ix_pack_orders_user ON pack_orders (user_id);
 
 -- ————— состояние самого сайта —————
 

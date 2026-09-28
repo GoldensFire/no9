@@ -1,5 +1,5 @@
 // Перенос своего из старой базы в новую: оценки и входы посетителей, разметка
-// паков, сами паки.
+// паков, сами паки, память об отправленном поисковикам.
 //
 // Отдельно от полки потому, что вопрос тут другой. Полка отвечает «где лежит
 // и как туда попасть», а здесь — «что из здешнего нельзя потерять, когда база
@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-	ASSET, dbPath, force, MARKUP, PERSONAL, prevPath, root, STAGE, TAG, WORK,
+	ASSET, dbPath, force, MARKUP, PERSONAL, prevPath, root, SENT, STAGE, TAG, WORK,
 } from './config.js';
 import { run, sqlPath } from './shelf.js';
 
@@ -335,11 +335,76 @@ function carryPacks(from, into) {
 }
 
 /**
+ * Слить память об отправленном поисковикам (см. SENT) из базы-источника
+ * в базу-приёмник: по каждому адресу остаётся та запись, где отправка позже.
+ *
+ * Зовётся там же, где carryMarkup, и в ту же сторону: при подмене базы источник —
+ * отодвинутая здешняя, при отправке на полку — полочная.
+ *
+ * @returns {number} сколько адресов перенесено
+ */
+export function carrySent(from, into) {
+	if (!fs.existsSync(from) || !fs.existsSync(into)) {
+		return 0;
+	}
+
+	const db = new DatabaseSync(into);
+	let moved = 0;
+
+	try {
+		db.exec(`ATTACH '${sqlPath(from)}' AS src`);
+
+		const shapeOf = (schema, table) => db
+			.prepare(`SELECT sql FROM ${schema}.sqlite_master WHERE type = 'table' AND name = ?`)
+			.get(table)?.sql;
+
+		for (const table of SENT) {
+			const shape = shapeOf('src', table);
+
+			// Там не отправляли ни разу — сливать нечего
+			if (!shape) {
+				continue;
+			}
+
+			// Здесь не отправляли ни разу — заводим такую же таблицу, с тем же
+			// ключом по адресу: без него слияние ниже не узнало бы повторов
+			if (!shapeOf('main', table)) {
+				db.exec(shape);
+			}
+
+			// «WHERE true» не лишнее: без него SQLite читает ON CONFLICT
+			// как продолжение SELECT и отказывается разбирать запрос
+			const { changes } = db.prepare(`
+				INSERT INTO main."${table}" (url, stamp, sent_at)
+				SELECT url, stamp, sent_at FROM src."${table}" WHERE true
+				ON CONFLICT (url) DO UPDATE SET stamp = excluded.stamp, sent_at = excluded.sent_at
+				WHERE excluded.sent_at > sent_at
+			`).run();
+
+			moved += Number(changes);
+		}
+
+		db.exec('DETACH src');
+	} catch (error) {
+		console.error(`Не вышло слить память об отправленном поисковикам: ${error.message}`);
+		console.error('База при этом целая — просто часть адресов уйдёт на переобход повторно.');
+	} finally {
+		db.close();
+	}
+
+	if (moved > 0) {
+		console.log(`Память об отправленном поисковикам: перенесено адресов — ${moved}.`);
+	}
+
+	return moved;
+}
+
+/**
  * Забрать с полки одну только базу — во временное место, не трогая здешнюю, —
- * и влить из неё в здешнюю то, чего здесь нет: разметку посвежее (carryMarkup)
- * и паки, которых здесь нет вовсе (carryPacks). Нужно перед отправкой, когда
- * полка успела уйти вперёд: то, что мы сейчас положим, не должно стереть
- * чужую работу.
+ * и влить из неё в здешнюю то, чего здесь нет: разметку посвежее (carryMarkup),
+ * паки, которых здесь нет вовсе (carryPacks), и память об отправленном
+ * поисковикам (carrySent). Нужно перед отправкой, когда полка успела уйти
+ * вперёд: то, что мы сейчас положим, не должно стереть чужую работу.
  */
 export function mergeShelf() {
 	const stage = path.join(root, STAGE);
@@ -371,6 +436,8 @@ export function mergeShelf() {
 			console.log(`Забрано с полки паков, которых здесь не было: ${carried.packs}`
 				+ `${carried.renumbered > 0 ? ` (из них ${carried.renumbered} с новым номером — прежний тут занят)` : ''}.`);
 		}
+
+		carrySent(shelfDb, dbPath);
 	} finally {
 		fs.rmSync(stage, { recursive: true, force: true });
 		fs.rmSync(path.join(root, WORK), { force: true });

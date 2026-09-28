@@ -117,5 +117,20 @@ export const MARKUP = [
 	},
 ];
 
+/**
+ * Память о том, что уже отправлено поисковикам: IndexNow (см. sentBefore
+ * в scripts/deploy/indexnow.js) и переобход в Яндексе (см. memory
+ * в scripts/recrawl.js).
+ *
+ * Переобход шлют двое — ночной обход и выкладка отсюда, — и каждый пишет
+ * в свою копию базы. Подмени одну другой как есть, и забудется то, что
+ * отправил второй: назавтра переобход назовёт Яндексу те же адреса ещё раз
+ * и сожжёт на них суточную квоту. Поэтому эти таблицы, как и разметка,
+ * не затираются, а сливаются — по каждому адресу, у кого отправка позже
+ * (см. carrySent в scripts/state/carry.js). IndexNow шлёт только эта машина,
+ * но и его память при подмене базы терять незачем.
+ */
+export const SENT = ['indexnow_sent', 'recrawl_sent'];
+
 export const command = process.argv[2] ?? 'status';
 export const force = process.argv.includes('--force');

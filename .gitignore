@@ -81,6 +81,7 @@ src/packlist.js
 src/search.js
 src/slug.js
 src/subject.js
+src/theme-search.js
 src/updater.js
 src/gemini/translate.js
 data/.fuzzy-nomask.mjs

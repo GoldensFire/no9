@@ -66,6 +66,9 @@ const FORMAT_WORDS = new Set([
 	// Площадка вместо названия: «Вокалоид» — это то же самое, что «Аниме».
 	'vocaloid', 'вокалоид', 'вокалоиды', 'utau', 'утау',
 	'nightcore', 'найткор', 'кавер', 'каверы', 'cover',
+	// Те же слова английским множественным числом: «Anime openings», «Covers»,
+	// «Riddles» и «Cosplay» проходили мимо и вставали паку подписью
+	'openings', 'endings', 'covers', 'vocaloids', 'cosplay', 'riddles',
 	'песня', 'песни', 'songs', 'музыка', 'music',
 	'франшиза', 'адаптация', 'экранизация', 'ремейк', 'продолжение',
 	// Способы модели сказать «предмета тут нет»
@@ -186,11 +189,19 @@ export function isAreaName(text) {
 const NOT_AREAS = new Set([
 	'кино', 'кинематограф', 'фильмы', 'фильм', 'сериалы', 'сериал', 'экранизации',
 	'cinema', 'movies', 'movie', 'film', 'films', 'series', 'tv series',
+	// «Кинематография» — то же «Кино», только длиннее. Модель пишет её
+	// и по-английски в оба поля сразу, и пак 21626 («Кинопак Ублюдский №1»)
+	// получил подпись «пак целиком про Cinematography» (23.09.2026)
+	'кинематография', 'киноискусство', 'киноиндустрия', 'кинопроизводство',
+	'cinematography', 'filmmaking', 'film industry', 'cinemas', 'adaptations',
 	'игры', 'игра', 'видеоигры', 'компьютерные игры', 'настольные игры',
 	'games', 'game', 'video games', 'videogames', 'board games', 'gaming',
+	'computer games', 'pc games', 'tabletop games',
 	'аниме', 'anime', 'манга', 'manga', 'манхва', 'manhwa',
 	'комиксы', 'комикс', 'comics', 'comic', 'графические романы', 'graphic novels',
 	'мультфильмы', 'мультики', 'мультсериалы', 'анимация', 'cartoons', 'animation',
+	'мультипликация', 'анимационные фильмы', 'анимационные сериалы',
+	'animated series', 'animated films', 'animated movies',
 	'книги', 'книга', 'литература', 'books', 'book', 'literature',
 	'музыка', 'music', 'песни', 'songs', 'треки', 'tracks',
 	'эрудиция', 'erudition', 'общие знания', 'general knowledge', 'знания',
