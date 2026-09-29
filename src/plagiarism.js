@@ -745,14 +745,29 @@ export function reviewPlagiarism(rows, limits) {
 		const donorThemes = new Map();
 
 		for (const { fp, donor } of marks) {
-			for (const place of entry.questions.get(fp)) {
+			const here = entry.questions.get(fp);
+
+			// Темы, где этот вопрос уже засчитан как отдельный. Вопрос, поставленный
+			// в тему трижды, — три места, но один вопрос: у донора он стоит
+			// единожды, и донор про него скажет «1 из 1». Чтобы подсказки двух
+			// паков не спорили между собой, тема помнит и то, и другое
+			const counted = new Set();
+
+			for (const place of here) {
 				questions++;
 
 				const key = `${place.round}:${place.theme}`;
-				const known = themes.get(key) ?? { round: place.round, theme: place.theme, borrowed: 0, donors: new Map() };
+				const known = themes.get(key)
+					?? { round: place.round, theme: place.theme, borrowed: 0, donors: new Map(), distinct: new Map() };
 
 				known.borrowed++;
 				known.donors.set(donor, (known.donors.get(donor) ?? 0) + 1);
+
+				if (!counted.has(key)) {
+					counted.add(key);
+					known.distinct.set(donor, (known.distinct.get(donor) ?? 0) + 1);
+				}
+
 				themes.set(key, known);
 			}
 
@@ -763,11 +778,23 @@ export function reviewPlagiarism(rows, limits) {
 				donorThemes.set(donor, mine);
 			}
 
+			const noted = new Set();
+
 			for (const place of donor.questions.get(fp)) {
 				const key = `${place.round}:${place.theme}`;
-				const known = mine.get(key) ?? { round: place.round, theme: place.theme, n: 0 };
+				const known = mine.get(key) ?? { round: place.round, theme: place.theme, n: 0, x: 0 };
 
 				known.n++;
+
+				// Сколько раз этот вопрос стоит у взявшего. Обычно столько же,
+				// сколько у донора, но бывает, что взявший ставит один вопрос
+				// в тему несколько раз, — и тогда у него «3 из 5», а здесь «1 из 1».
+				// Без этого числа подсказки двух паков противоречили бы друг другу
+				if (!noted.has(key)) {
+					noted.add(key);
+					known.x += here.length;
+				}
+
 				mine.set(key, known);
 			}
 		}
@@ -813,9 +840,20 @@ export function reviewPlagiarism(rows, limits) {
 			// нет в списке доноров пака. В остальных случаях он повторял бы то,
 			// что уже сказано полями source и n, и лежал бы лишним весом
 			// в каждой строке базы
-			if (ranked.length > 1 || !named.has(donor.id)) {
-				place.donors = ranked.slice(0, MAX_PER_THEME)
-					.map(([who, count]) => ({ id: who.id, name: who.name, n: count }));
+			//
+			// Повторы тоже требуют списка: сколько тут разных вопросов, а сколько
+			// мест, полями source и n не сказать. Поле q — разных вопросов —
+			// ставится, только когда их меньше, чем мест
+			const repeated = ranked.some(([who, count]) => item.distinct.get(who) < count);
+
+			if (ranked.length > 1 || !named.has(donor.id) || repeated) {
+				place.donors = ranked.slice(0, MAX_PER_THEME).map(([who, count]) => {
+					const distinct = item.distinct.get(who);
+
+					return distinct < count
+						? { id: who.id, name: who.name, n: count, q: distinct }
+						: { id: who.id, name: who.name, n: count };
+				});
 			}
 
 			return place;
@@ -890,7 +928,11 @@ export function reviewPlagiarism(rows, limits) {
 					by: [],
 				};
 
-				known.by.push({ id: entry.id, name: entry.name, n: item.n });
+				// x — сколько раз эти вопросы стоят у взявшего; ставится, только
+				// когда он их повторял
+				known.by.push(item.x > item.n
+					? { id: entry.id, name: entry.name, n: item.n, x: item.x }
+					: { id: entry.id, name: entry.name, n: item.n });
 				victim.set(key, known);
 			}
 		}
