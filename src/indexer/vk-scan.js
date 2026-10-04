@@ -181,6 +181,19 @@ function syncComment(comment, useApi, tally) {
  * там — файл из сообщения, здесь — само сообщение; хоронятся оба одинаково
  * и одинаково же оживают, когда сообщение возвращают.
  *
+ * ————— сообщение есть, а файла в нём нет —————
+ *
+ * Третий случай выглядит как ни один из двух. Автор правит сообщение и убирает
+ * из него пак, оставив картинку и пару слов: так ушёл «кринж солянка №7» (21644)
+ * 29 сентября 2026 — модераторы попросили переименовать темы, автор файл снял,
+ * а сообщение 1102 осталось с одной фотографией. До syncComment оно доходит
+ * (вложение-то есть), но там отсеивается сразу: .siq в нём нет, сверять нечего.
+ * А здесь номер его среди прочитанных — и пак числился живым каждую ночь.
+ *
+ * Поэтому, кроме «прочитано», нужно ещё «прочитано и с паком» (`filed`): номер
+ * из первого набора, которого нет во втором, — это сообщение без единого .siq,
+ * и пак из него убран ровно так же, как если бы стёрли сообщение целиком.
+ *
  * Спрашивать об этом вправе только полный обход темы. Хвост старой её части
  * не читал вовсе, оборванный обход не дочитал, перешагнутое окно унесло с собой
  * до сотни сообщений — для всех троих «сообщения нет» неотличимо от «мы туда
@@ -190,17 +203,22 @@ function syncComment(comment, useApi, tally) {
  *
  * @param {string} topicUrl тема, которую только что прочитали целиком
  * @param {Set<number>} seen номера сообщений, которые в ней нашлись
+ * @param {Set<number>} filed из них — те, где приложен хотя бы один .siq
+ *   (и те, что пропущены отсечкой темы: их не сверяли вовсе, и судить их не нам)
  * @param {object} tally общая копилка обхода
  */
-function missingComments(topicUrl, seen, tally) {
+function missingComments(topicUrl, seen, filed, tally) {
 	const normalized = normalizeTopicUrl(topicUrl);
 
 	for (const row of knownInTopic.all(normalized)) {
 		// Пак, заведённый без номера сообщения, судить не по чему: его не было бы
 		// среди прочитанных при любом исходе
-		if (row.vk_comment === null || seen.has(row.vk_comment)) {
+		if (row.vk_comment === null || filed.has(row.vk_comment)) {
 			continue;
 		}
+
+		// Сообщение на месте, но паков в нём не осталось ни одного
+		const emptied = seen.has(row.vk_comment);
 
 		const title = row.name ?? row.file_name ?? row.source_key;
 		// Только внутри своей темы: файл, всплывший в другом обсуждении, — это
@@ -229,8 +247,10 @@ function missingComments(topicUrl, seen, tally) {
 
 		tally.pending.push({
 			kind: 'gone',
-			apply: () => markGone.run('сообщение с паком удалено из обсуждения', row.id),
-			say: `сообщение удалено: «${title}»`,
+			apply: () => markGone.run(emptied
+				? 'из сообщения обсуждения убраны все паки'
+				: 'сообщение с паком удалено из обсуждения', row.id),
+			say: emptied ? `из сообщения убраны все паки: «${title}»` : `сообщение удалено: «${title}»`,
 		});
 	}
 }
@@ -350,6 +370,9 @@ export async function scanVk() {
 		// где нет ни одного файла. По ним ниже разбирается, чьё сообщение
 		// из обсуждения убрали (см. missingComments)
 		const seenComments = new Set();
+		// Из них — те, где лежит пак (см. «сообщение есть, а файла в нём нет»
+		// у missingComments)
+		const filedComments = new Set();
 		let torn = false;
 		const gapsBefore = gaps;
 		const unreadableBefore = unreadable;
@@ -406,9 +429,15 @@ export async function scanVk() {
 					const ts = comment.ts ?? parseVkDate(comment.date);
 
 					if (ts === null || ts >= cutoff) {
+						// Не сверяли — значит, и не нам говорить, что пака там нет
+						filedComments.add(comment.id);
 						skipped++;
 						continue;
 					}
+				}
+
+				if (comment.documents.some(document => /\.siq$/i.test(document.fileName))) {
+					filedComments.add(comment.id);
 				}
 
 				syncComment(comment, useApi, tally);
@@ -454,7 +483,7 @@ export async function scanVk() {
 			&& gaps === gapsBefore && unreadable === unreadableBefore;
 
 		if (whole) {
-			missingComments(topicUrl, seenComments, tally);
+			missingComments(topicUrl, seenComments, filedComments, tally);
 		}
 	}
 

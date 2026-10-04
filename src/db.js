@@ -468,6 +468,16 @@ for (const [name, definition] of [
 	// Единица — «пак у своего названия один»: она же стоит умолчанием, она же
 	// достаётся паку без ключа сравнения, и на неё же делят, когда тёзок нет.
 	['stats_twins', 'INTEGER NOT NULL DEFAULT 1'],
+	// Сколько файлов пака прошло через SI-HYX — по меткам в их именах
+	// (см. src/hyx.js). NULL — «ещё не смотрели»: оглавление архива читал разбор,
+	// а пакам, разобранным до правила, его досматривает шаг hyx
+	// (см. fetchHyx в src/indexer/backfill.js). Видит это на сайте только хозяин
+	// (см. toPackage в cf/src/library/packs.js).
+	['hyx_files', 'INTEGER'],
+	// Подробности тем же JSON: {of, tabs: {вкладка: файлов}, generated}.
+	// generated — пак собран вкладкой «Генерация аниме-пака», его карточка
+	// метится красным
+	['hyx_detail', 'TEXT'],
 ]) {
 	if (!existingColumns.has(name)) {
 		db.exec(`ALTER TABLE packages ADD COLUMN ${name} ${definition}`);

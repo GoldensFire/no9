@@ -15,6 +15,7 @@ import { config } from '../config.js';
 import { db, authorsOrVk, buildMatchKey, saveAuthors } from '../db.js';
 import { openRemoteZip, DeadLinkError } from '../zip.js';
 import { isObsceneName } from '../obscene.js';
+import { hyxDetail, hyxFiles } from '../hyx.js';
 import { parseContentXml } from '../siq.js';
 import { ensurePreview, ensureThumb, hasPreview, isAvif } from '../thumbs.js';
 import { thumbName } from '../logo.js';
@@ -226,10 +227,14 @@ export async function parsePackages() {
 					const logo = await fetchLogo(archive, parsed.logo, row.id)
 						.catch(() => ({ file: null, state: 'error', shown: false }));
 
-					return { parsed, logo, totalSize: archive.totalSize };
+					// Следы SI-HYX — по именам файлов в оглавлении, оно уже на руках
+					// (см. src/hyx.js)
+					const hyx = hyxFiles(archive.entries.map(item => item.name), parsed.authors);
+
+					return { parsed, logo, hyx, totalSize: archive.totalSize };
 				}));
 
-				const { parsed, logo, totalSize } = result;
+				const { parsed, logo, hyx, totalSize } = result;
 
 				// Не подписался в файле — подписывается страницей ВК, с которой
 				// пак выложен (см. authorsOrVk выше)
@@ -262,6 +267,8 @@ export async function parsePackages() {
 					// просит поисковик её не индексировать, но с сайта пак
 					// никуда не девается (см. src/obscene.js)
 					isObsceneName(parsed.name) ? 1 : 0,
+					hyx.files,
+					hyxDetail(hyx),
 					Date.now(),
 					row.id,
 				);

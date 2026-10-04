@@ -13,6 +13,7 @@
 //   node src/indexer.js --specials      досчитать спецвопросы у старых паков
 //   node src/indexer.js --prints        снять отпечатки вопросов у старых паков (по ним ищется списанное)
 //   node src/indexer.js --durations    померить длительность медиафайлов (среднюю и самую большую)
+//   node src/indexer.js --hyx          найти файлы, сделанные SI-HYX (по меткам в именах)
 //   node src/indexer.js --merge-authors свести подписи одного человека: паки с одной страницы ВК — один автор
 //   node src/indexer.js --copies        пометить копии паков: на сайте остаётся самая ранняя выкладка
 //   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: без сети, по отпечаткам вопросов
@@ -21,7 +22,7 @@
 //   node src/indexer.js --resummary     переписать уже готовые описания
 //   node src/indexer.js --upgrade       переспросить то, что размечено моделью слабее нынешней
 //   node src/indexer.js --recalc        пересчитать уровни и ярлыки по сохранённым данным, без сети
-//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, prints, durations, authors, copies, plagiarism, recalc
+//   node src/indexer.js --steps=a,b     явный список шагов: vk, parse, stats, statsnew, topics, summary, logos, specials, prints, durations, hyx, authors, copies, plagiarism, recalc
 //   node src/indexer.js --model=имя     разово взять другую модель Gemini
 //   node src/indexer.js --fallback      кончились суточные запросы — перейти на запасную модель
 //   node src/indexer.js --fallback=any  то же, но на любую другую, начиная с самой мощной
@@ -105,7 +106,7 @@ import { report, TAGS, Track, track, tracks } from './indexer/progress.js';
 import { beginRun, isChosen, markFinished, selectedSteps } from './indexer/steps.js';
 import { scanVk } from './indexer/vk-scan.js';
 import { fetchLogos, hasThumb, parsePackages } from './indexer/parse.js';
-import { fetchDurations, fetchPrints, fetchSpecials } from './indexer/backfill.js';
+import { fetchDurations, fetchHyx, fetchPrints, fetchSpecials } from './indexer/backfill.js';
 import { refreshStats } from './indexer/sistats.js';
 import { refreshAnalysis, refreshSummaries, refreshTopics } from './indexer/marking.js';
 import { mergeAuthors } from './indexer/authors.js';
@@ -233,6 +234,7 @@ const RUNNERS = {
 	specials: fetchSpecials,
 	prints: fetchPrints,
 	durations: fetchDurations,
+	hyx: fetchHyx,
 	authors: mergeAuthors,
 	copies: markCopies,
 	plagiarism: checkPlagiarism,

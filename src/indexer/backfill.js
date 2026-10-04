@@ -1,5 +1,5 @@
 // Досчёт того, чего у старых паков нет: отпечатки вопросов, длительность медиа,
-// спецвопросы.
+// спецвопросы, следы SI-HYX.
 //
 // Все три считает разбор — но только новым пакам. Паку, разобранному до того,
 // как правило появилось, переразбор не нужен: он переписал бы заодно и всё
@@ -12,12 +12,13 @@ import { openRemoteZip } from '../zip.js';
 import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
+import { hyxDetail, hyxFiles } from '../hyx.js';
 import { force, jobs, reprints } from './options.js';
 import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
 import { say } from './progress.js';
 import { queueNote, targetSql } from './queue.js';
 import { isChosen } from './steps.js';
-import { storeDurations, storePrints, storeRounds, updateSpecials } from './store.js';
+import { storeDurations, storePrints, storeRounds, updateHyx, updateSpecials } from './store.js';
 
 /**
  * Досчитывает отпечатки вопросов у паков, разобранных до того, как их научились
@@ -274,6 +275,81 @@ export async function fetchDurations() {
 	});
 
 	say('durations', `померено у ${ok} паков, из них с медиа ${withMedia}, файлов в них ${files}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
+}
+
+/**
+ * Следы SI-HYX у паков, разобранных до того, как их научились искать.
+ *
+ * Читается одно оглавление архива — имена файлов, больше ничего (см. src/hyx.js):
+ * это самый дешёвый из здешних шагов, один-два range-запроса на пак. Подписи
+ * берутся из базы, а не из content.xml: разбор их уже записал.
+ */
+export async function fetchHyx() {
+	const target = targetSql();
+	const missing = force ? '' : ' AND p.hyx_files IS NULL';
+
+	const pending = db.prepare(`
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name, p.authors FROM packages p
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
+	`);
+
+	const params = target.params;
+
+	say('hyx', `не смотрены следы SI-HYX у ${pending.all(...params).length} паков${queueNote(false)}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+
+	let ok = 0;
+	let failed = 0;
+	let dead = 0;
+	let found = 0;
+	let generated = 0;
+
+	await drain({
+		step: 'hyx',
+		jobs,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			try {
+				const names = await retryNetwork(() => withFreshUrl(row, async url =>
+					(await openRemoteZip(url)).entries.map(item => item.name)));
+				let authors = [];
+
+				try {
+					authors = JSON.parse(row.authors ?? '[]');
+				} catch {
+					// Подпись не разобрать — признаков генератора остаётся два
+				}
+
+				const hyx = hyxFiles(names, authors);
+
+				updateHyx.run(hyx.files, hyxDetail(hyx), row.id);
+				ok++;
+
+				if (hyx.files > 0 || hyx.generated) {
+					found++;
+					generated += hyx.generated ? 1 : 0;
+					say('hyx', `${bar.label()} ${row.name ?? row.file_name}: ${hyx.files} из ${hyx.of}`
+						+ `${hyx.generated ? ', сгенерирован' : ''} ${JSON.stringify(hyx.tabs)}`);
+				}
+			} catch (error) {
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+				}
+
+				say('hyx', `${row.name ?? row.file_name}: ${error.message}`);
+			}
+
+			if (bar.milestone(25)) {
+				say('hyx', bar.line);
+			}
+		},
+	});
+
+	say('hyx', `посмотрено ${ok} паков, следы SI-HYX у ${found}, из них сгенерировано ${generated}`
 		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 }
 

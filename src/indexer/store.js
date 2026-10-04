@@ -142,9 +142,17 @@ export const updateParsed = db.prepare(`
 		language = ?, pack_date = ?, pack_id = ?, size = ?, question_count = ?, round_count = ?,
 		theme_count = ?, special_count = ?, special_stat = ?, content_stat = ?, rounds = ?,
 		media_own = ?, media_offsite = ?, logo_file = ?, logo_state = ?, obscene = ?,
+		hyx_files = ?, hyx_detail = ?,
 		status = 'ok', error = NULL, recheck = 0, indexed_at = ?
 	WHERE id = ?
 `);
+
+/**
+ * Следы SI-HYX — отдельно для шага hyx: у пака, разобранного до правила,
+ * оглавление архива читается только ради них (см. fetchHyx в src/indexer/backfill.js).
+ * Разбор пишет то же самое сам, через updateParsed.
+ */
+export const updateHyx = db.prepare('UPDATE packages SET hyx_files = ?, hyx_detail = ? WHERE id = ?');
 
 export const updateFailed = db.prepare(`UPDATE packages SET status = ?, error = ?, recheck = 0, indexed_at = ? WHERE id = ?`);
 

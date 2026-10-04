@@ -210,7 +210,7 @@ const doFresh = onlyFresh || (!process.argv.includes('--no-fresh')
  * при этом не делаются — во втором проходе они те же самые и просто
  * пересматривают всё заново вместе с добавившимся.
  */
-const FRESH_STEPS = 'vk,parse,statsnew,topics,summary,logos,specials,prints,durations,'
+const FRESH_STEPS = 'vk,parse,statsnew,topics,summary,logos,specials,prints,durations,hyx,'
 	+ 'authors,copies,plagiarism,recalc';
 
 /**
@@ -282,7 +282,7 @@ const TAIL = '--tail';
  * Спецвопросы (`specials`) добавлены за компанию и по той же причине: очередь
  * у них конечная, а стояли они в одном лишь забеге за свежим.
  */
-const REST_STEPS = 'parse,stats,topics,summary,logos,specials,prints,durations,'
+const REST_STEPS = 'parse,stats,topics,summary,logos,specials,prints,durations,hyx,'
 	+ 'authors,copies,plagiarism,recalc';
 
 fs.mkdirSync(logsPath, { recursive: true });
