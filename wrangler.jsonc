@@ -9,6 +9,8 @@
 	// Имя Worker в облаке; адрес сайта задан ниже, в "routes".
 	"name": "firepacks",
 	"main": "cf/src/index.js",
+	// Новая выкладка читает собственный кэш, а не страницы прежней версии.
+	"version_metadata": { "binding": "WORKER_VERSION" },
 	"compatibility_date": "2026-08-01",
 
 	// Своё имя сайта. "custom_domain" — это не путь в чужой зоне, а весь адрес
