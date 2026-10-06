@@ -82,6 +82,7 @@ src/search.js
 src/slug.js
 src/subject.js
 src/theme-search.js
+src/neighbors.js
 src/updater.js
 src/gemini/translate.js
 data/.fuzzy-nomask.mjs
@@ -90,6 +91,7 @@ data/.fuzzy-nomask.mjs
 # напрямую, а scripts/update.js — это `npm run index` и его соседи по package.json:
 # разовая работа руками, которой в Actions не бывает.
 scripts/build-web.js
+scripts/build-neighbors.js
 scripts/update.js
 scripts/start.js
 scripts/setup-cf.js
