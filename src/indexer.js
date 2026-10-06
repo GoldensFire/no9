@@ -16,7 +16,7 @@
 //   node src/indexer.js --hyx          найти файлы, сделанные SI-HYX (по меткам в именах)
 //   node src/indexer.js --merge-authors свести подписи одного человека: паки с одной страницы ВК — один автор
 //   node src/indexer.js --copies        пометить копии паков: на сайте остаётся самая ранняя выкладка
-//   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: без сети, по отпечаткам вопросов
+//   node src/indexer.js --plagiarism    пересмотреть, кто у кого списал: по отпечаткам, подтвердив старые адреса ВК
 //   node src/indexer.js --reparse       разобрать заново уже разобранные паки
 //   node src/indexer.js --retopics      переспросить Gemini даже про уже размеченные паки
 //   node src/indexer.js --resummary     переписать уже готовые описания
@@ -92,6 +92,7 @@
 //   sistats.js    статистика с сервиса SIGame
 //   model.js      кончившиеся лимиты Gemini и переход на запасную модель
 //   marking.js    разметка моделью: тематики, описания, «всё о паке»
+//   accounts.js   постоянные номера отправителей старых сообщений ВК
 //   authors.js    один автор — один человек
 //   copies.js     копии паков
 //   plagiarism.js кто у кого списал
@@ -110,6 +111,7 @@ import { fetchDurations, fetchHyx, fetchPrints, fetchSpecials } from './indexer/
 import { refreshStats } from './indexer/sistats.js';
 import { refreshAnalysis, refreshSummaries, refreshTopics } from './indexer/marking.js';
 import { mergeAuthors } from './indexer/authors.js';
+import { normalizeVkAccounts } from './indexer/accounts.js';
 import { markCopies } from './indexer/copies.js';
 import { checkPlagiarism } from './indexer/plagiarism.js';
 import { recalcAll } from './indexer/recalc.js';
@@ -262,12 +264,21 @@ report({ plan: steps.map(step => ({ key: step.key, name: step.name })) });
 
 let broke = false;
 
+// Одна сверка старых адресов на запуск, общая для авторов и плагиата.
+// Все ждут обхода и разбора: новые сообщения сначала должны попасть в базу.
+let accountsReady;
+
 /** Один шаг: дождаться тех, после кого положено, сделать своё, отметиться. */
 async function runStep(step, waitFor) {
 	await Promise.all(waitFor);
 	report({ step: step.key, state: 'start' });
 
 	try {
+		if (['authors', 'plagiarism'].includes(step.key)) {
+			accountsReady ??= normalizeVkAccounts();
+			await accountsReady;
+		}
+
 		await RUNNERS[step.key]();
 	} catch (error) {
 		broke = true;

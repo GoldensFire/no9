@@ -79,11 +79,14 @@ export const STEPS = [
 	// Флаг зовётся --merge-authors, а не --authors: `--authors=имя` уже занято
 	// сужением работы до паков этого автора, и одно имя на две разные вещи
 	// разбиралось бы наугад
-	{ key: 'authors', name: 'Один автор — один человек', flag: '--merge-authors', byDefault: true, after: ['parse'] },
+	// Перед авторами и плагиатом точка входа подтверждает старые адреса ВК по
+	// отправителям сообщений (см. accounts.js). Поэтому ждут и самого обхода,
+	// даже когда разбор файлов в этом запуске не выбран.
+	{ key: 'authors', name: 'Один автор — один человек', flag: '--merge-authors', byDefault: true, after: ['vk', 'parse'] },
 	// Копии одного пака. Ждёт отпечатков по-настоящему: без них копию от соседа
 	// по серии не отличить, и пак с неснятыми отпечатками копией не станет
 	{ key: 'copies', name: 'Копии паков', flag: '--copies', byDefault: true, after: ['parse', 'prints'] },
-	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', byDefault: true, after: ['parse', 'prints'] },
+	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', byDefault: true, after: ['vk', 'parse', 'prints'] },
 	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', byDefault: false, after: ['stats', 'statsnew', 'topics', 'analyze'] },
 ];
 
