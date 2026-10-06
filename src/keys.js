@@ -9,6 +9,8 @@
 // db.js всё это перевыпускает наружу, поэтому в самом проекте ничего
 // не изменилось: как импортировали packKey из db.js, так и импортируем.
 
+import { CHOSEN_NAMES_SQL } from './author-names.js';
+
 export function jsonOrDefault(value, fallback) {
 	if (value === null || value === undefined) {
 		return fallback;
@@ -469,6 +471,11 @@ export const NAME_KEY_INDEX_SQL = nameKeySql('');
  * Живут паки только со status = 'ok': мёртвые и снятые с публикации имени
  * не выбирают. Кусок запроса, а не функция, потому что спрашивают его трое —
  * домашний сайт, сборка статики и Worker, — и разойтись им нельзя.
+ *
+ * Счёт паков уступает одному — нику, который автор выбрал себе сам
+ * (см. src/author-names.js). Выбранное написание могло остаться только
+ * на мёртвых паках, поэтому оно приклеено отдельной половиной, а не
+ * сортировкой внутри первой: та видит одни живые.
  */
 export const AUTHOR_NAME_SQL = `
 	SELECT k, name FROM (
@@ -480,7 +487,9 @@ export const AUTHOR_NAME_SQL = `
 		FROM pack_authors a JOIN packages p ON p.id = a.package_id
 		WHERE p.status = 'ok'
 		GROUP BY a.canon_key, a.author
-	) WHERE rn = 1
+	) WHERE rn = 1 AND k NOT IN (SELECT k FROM (${CHOSEN_NAMES_SQL}))
+	UNION ALL
+	SELECT k, name FROM (${CHOSEN_NAMES_SQL})
 `;
 
 /**

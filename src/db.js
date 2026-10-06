@@ -7,6 +7,7 @@ import {
 	PACK_KEY_INDEX_SQL, NAME_KEY_INDEX_SQL,
 } from './keys.js';
 import { isObsceneName } from './obscene.js';
+import { AUTHOR_NAMES_TABLE_SQL } from './author-names.js';
 
 // Ключи пака и чтение его полей лежат в keys.js: тот файл ничего не знает
 // про node:sqlite, и его читает двойник сайта на Cloudflare Workers (см. cf/).
@@ -673,6 +674,12 @@ export function markObscene(where = '', params = []) {
 	// подписей — двадцать тысяч строк, считанных по тарифу D1, на каждый вход
 	db.exec('CREATE INDEX IF NOT EXISTS ix_pack_authors_account ON pack_authors (canon_account)');
 }
+
+// Ники, которые авторы выбрали себе на сайте. Хозяин у этой таблицы — база
+// наверху: выбирают там, а сюда каждая выкладка привозит копию (см. pullAuthorNames
+// в scripts/deploy/author-names.js). Нужна она здесь затем, чтобы сборка статики
+// и ночной обход звали автора тем же именем, что и сайт (см. src/author-names.js)
+db.exec(AUTHOR_NAMES_TABLE_SQL);
 
 // Дозаливка колонок в свёртку отпечатков
 {

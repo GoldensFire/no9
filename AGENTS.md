@@ -63,7 +63,7 @@ FirePacks — библиотека паков для «Своей игры». Ж
 
 Сегодня из `cf/src/index.js` достижимы, кроме самого `cf/`: `src/settings.js`,
 `src/names.js`, `src/logo.js`, `src/keys.js`, `src/packlist.js`, `src/slug.js`,
-`src/subject.js`, `src/fuzzy.js`, `src/content.js`, `src/i18n.js` (и словари
+`src/subject.js`, `src/fuzzy.js`, `src/content.js`, `src/author-names.js`, `src/i18n.js` (и словари
 в `src/i18n/`) и весь `src/meta/`. Заводя новый общий файл, держи ту же дисциплину и скажи
 об этом в его шапке — так сделано в `data/.fuzzy-nomask.mjs`.
 
@@ -96,6 +96,9 @@ src/names.js      названия: тематики, жанры, формы, п
 src/logo.js       как называются обложка карточки и крупная копия для чужих
                   окон и по каким адресам их показывают
 src/keys.js       ключ пака и чтение его полей — общее с Worker
+src/author-names.js  ник, выбранный автором: таблица, условия (все паки
+                  с одной его страницы ВК, без соавторов) и запрос, которым
+                  выбор ложится в canon_name, — общее с Worker и выкладкой
 src/content.js    из чего пак состоит, насколько это похоже на другой пак
                   (франшизы, доли вопросов по тематикам и видам «прочего»,
                   сложность, язык, целевая аудитория) и чем пак хуже соседа
@@ -167,7 +170,8 @@ web/app.js        страница библиотеки — она же стра
 scripts/deploy-cf.js  порядок выкладки; scripts/deploy/ — options, wrangler,
                       d1, columns (досыл колонок, которых схема живущей базе
                       донести не может), drift (сверка статусов с тем, что уже
-                      наверху), rowhash, site, works, indexnow
+                      наверху), author-names (ники авторов: домой до сборки,
+                      наверх после заливки), rowhash, site, works, indexnow
 scripts/deploy-logos.js  обложки наверх отдельным Worker'ом без кода
                       (cf/logos/wrangler.jsonc): им и живёт ночной обход,
                       которому статику сайта собрать не из чего

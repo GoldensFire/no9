@@ -52,6 +52,7 @@ import { checkAuth, run, writeDevVars } from './deploy/wrangler.js';
 import { pour } from './deploy/d1.js';
 import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
+import { pullAuthorNames, pushAuthorNames } from './deploy/author-names.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { recrawl } from './recrawl.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
@@ -153,6 +154,14 @@ async function main() {
 	// ничего не уедет, а узнать об этом лучше сейчас, чем через пять минут
 	checkAuth();
 
+	// Ники, которые авторы выбрали себе на сайте, — домой до сборки: имя автора
+	// на карточке и адрес его страницы собирает статика, и звать его она должна
+	// так, как он выбрал (см. scripts/deploy/author-names.js). До выгрузки
+	// базы — по той же причине: строки подписей с новым именем уезжают наверх
+	// ею же
+	console.log('\n───── Ники авторов ─────');
+	await pullAuthorNames();
+
 	// Статику собирает тот, у кого она есть. В репозитории её нет: наверх
 	// из Actions уезжает только база, а сайт — код страниц, стили и готовые
 	// ответы prebuilt.json — выкладывается из дома (см. dbOnly в deploy/options.js).
@@ -218,6 +227,11 @@ async function main() {
 	// который заливка не трогает (см. cf/hidden.sql).
 	console.log('\n───── Снятые с публикации ─────');
 	await pour('cf/hidden.sql');
+
+	// То же самое с никами авторов: заливка вернула строкам подписей домашние
+	// имена, а выбор, сделанный за время выкладки, дома ещё неизвестен
+	console.log('\n───── Ники авторов наверху ─────');
+	await pushAuthorNames();
 
 	if (local) {
 		writeDevVars();
