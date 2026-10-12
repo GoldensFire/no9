@@ -63,27 +63,50 @@ import { say } from './progress.js';
  * NEAR_MIN_LENGTH, и та, другая, крупнее. Мерка нарочно сделана такой узкой:
  * похожие имена сами по себе не значат ничего («Anna» и «Anny» — двое разных),
  * и решает здесь не похожесть, а похожесть ВМЕСТЕ с общей страницей ВК.
+ *
+ * ————— и отдельно: совместные паки —————
+ *
+ * Совместный пак выкладывает один из соавторов, а подписаны им все. По правилу
+ * выше это делало соавторов «людьми со страницы выложившего»: пятеро друзей
+ * автора, ни разу не выкладывавших паков сами, сошлись в одного человека
+ * с его страницей ВК — а сам автор остался без страницы вовсе, потому что
+ * один совместный пак с его подписью выложил с другой страницы соавтор.
+ * Вошедший через ВК получал чужие ники и не получал своих паков.
+ *
+ * Поэтому страница ВК подписи считается только по её одиночным пакам: кто
+ * из соавторов выложил совместный — признак не про авторство. Подпись,
+ * встречающаяся лишь в совместных паках, страницы не получает вовсе и ни с кем
+ * не сливается. Опечатки (seenByAccount) по-прежнему видят все паки: там
+ * страница — лишь подтверждение похожего написания, а не довод сама по себе.
  */
 export function mergeAuthors() {
 	// Строка на «подпись под паком, выложенным с этого аккаунта». Мёртвые
 	// и похороненные паки в счёт идут наравне с живыми: аккаунт, с которого
 	// выкладывали, остаётся тем же аккаунтом, а вот подпись, встречающаяся
 	// только у мёртвого пака, без них потеряла бы своего человека
+	//
+	// shared — пак совместный: подписей под ним больше одной. Его аккаунт
+	// подписи не достаётся (см. «совместные паки» выше)
 	const rows = db.prepare(`
-		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account, COUNT(*) AS packs,
+		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account,
+			(SELECT COUNT(*) FROM pack_authors b WHERE b.package_id = a.package_id) > 1 AS shared,
+			COUNT(*) AS packs,
 			SUM(CASE WHEN p.status = 'ok' THEN 1 ELSE 0 END) AS live
 		FROM pack_authors a JOIN packages p ON p.id = a.package_id
-		GROUP BY a.author_key, a.author, p.vk_author_url
+		GROUP BY a.author_key, a.author, p.vk_author_url, shared
 	`).all();
 
-	/** Подпись -> {написания, из них живые, аккаунты, сколько паков}. */
+	/**
+	 * Подпись -> {написания, из них живые, аккаунты одиночных паков,
+	 * аккаунты всех паков, сколько паков}.
+	 */
 	const signatures = new Map();
 
 	for (const row of rows) {
 		let item = signatures.get(row.key);
 
 		if (!item) {
-			item = { key: row.key, spellings: new Map(), live: new Map(), accounts: new Set(), packs: 0 };
+			item = { key: row.key, spellings: new Map(), live: new Map(), accounts: new Set(), seen: new Set(), packs: 0 };
 			signatures.set(row.key, item);
 		}
 
@@ -92,6 +115,15 @@ export function mergeAuthors() {
 		item.packs += row.packs;
 
 		const account = (row.account ?? '').trim();
+
+		if (account) {
+			item.seen.add(account);
+		}
+
+		// Совместный пак выложил кто-то из соавторов — неизвестно кто
+		if (row.shared) {
+			continue;
+		}
 
 		// Пак, выложенный не через ВК или без адреса автора, аккаунтом
 		// не считается: неизвестность не должна связывать подписи между собой
@@ -116,12 +148,10 @@ export function mergeAuthors() {
 	const seenByAccount = new Map();
 
 	for (const item of signatures.values()) {
-		for (const account of item.accounts) {
-			if (!account.startsWith('?')) {
-				const all = seenByAccount.get(account) ?? [];
-				all.push(item);
-				seenByAccount.set(account, all);
-			}
+		for (const account of item.seen) {
+			const all = seenByAccount.get(account) ?? [];
+			all.push(item);
+			seenByAccount.set(account, all);
 		}
 
 		if (item.accounts.size !== 1) {
