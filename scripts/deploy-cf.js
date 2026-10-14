@@ -38,6 +38,7 @@
 //   d1.js         заливка базы запросами через D1 REST, а не файлом
 //   drift.js      сверка: не разошлось ли лежащее наверху с тем, что база
 //                 считает отправленным
+//   hidden.js     список снятых с публикации паков — домой, для сборки
 //   rowhash.js    отпечаток строки — один на выгрузку и на сверку
 //   site.js       по какому адресу сайт открывается наверху
 //   works.js      плашка «идут работы» и проверка живости после выкладки
@@ -53,6 +54,7 @@ import { pour } from './deploy/d1.js';
 import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
 import { pullAuthorNames, pushAuthorNames } from './deploy/author-names.js';
+import { pullHiddenPacks } from './deploy/hidden.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { recrawl } from './recrawl.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
@@ -181,6 +183,11 @@ async function main() {
 	// ею же
 	console.log('\n───── Ники авторов ─────');
 	await pullAuthorNames();
+
+	// Снятые с публикации паки — туда же и по той же причине: место автора
+	// в рейтинге считает сборка, и снятые она считать не должна
+	// (см. scripts/deploy/hidden.js)
+	await pullHiddenPacks();
 
 	// Статику собирает тот, у кого она есть. В репозитории её нет: наверх
 	// из Actions уезжает только база, а сайт — код страниц, стили и готовые
