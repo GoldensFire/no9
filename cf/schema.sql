@@ -588,6 +588,43 @@ CREATE TABLE IF NOT EXISTS pack_orders (
 CREATE INDEX IF NOT EXISTS ix_pack_orders_created ON pack_orders (created_at);
 CREATE INDEX IF NOT EXISTS ix_pack_orders_user ON pack_orders (user_id);
 
+-- ————— ключи API —————
+--
+-- Кому открыто хранилище в формате SIStorage — тот же поиск, справочники
+-- и паки, что у сайта, но для чужого сервера (см. cf/src/sistorage/api.js).
+-- Ключ выдаёт хозяин сайта в /admin учётной записи человека: так видно, чей он,
+-- и отзывается он одной строкой, без смены чего-либо у остальных.
+--
+-- Сам ключ здесь не лежит — только его sha256, как у сессий: утёкшая база
+-- не должна давать доступа к API. tail — последние четыре знака, чтобы в списке
+-- было видно, какой из ключей человека какой.
+--
+-- Отозванный ключ не стирается, а помечается: в списке остаётся, кому и когда
+-- он был выдан (см. cf/src/library/api-keys.js).
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	key_hash TEXT NOT NULL UNIQUE,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	note TEXT NOT NULL DEFAULT '',
+	tail TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	created_by INTEGER,
+	revoked_at INTEGER
+);
+
+-- Кому хозяин сайта открыл доступ к API. Ключ человек выпускает себе сам,
+-- в настройках профиля, и только пока здесь есть его строка: закрытие доступа
+-- стирает строку и гасит его ключи (см. cf/src/library/api-keys.js).
+CREATE TABLE IF NOT EXISTS api_access (
+	user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+	note TEXT NOT NULL DEFAULT '',
+	granted_at INTEGER NOT NULL,
+	granted_by INTEGER
+);
+
+-- Действующий ключ человека ищется по нему самому
+CREATE INDEX IF NOT EXISTS ix_api_keys_user ON api_keys (user_id, revoked_at);
+
 -- ————— состояние самого сайта —————
 
 -- Одна строка на признак: сейчас в ней живёт единственный — идут ли технические
