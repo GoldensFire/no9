@@ -9,7 +9,7 @@
 
 import { config } from '../config.js';
 import { db } from '../db.js';
-import { fetchPackageStats, summarize, toLevel } from '../stats.js';
+import { fetchPackageStats, summarize, themeStats, toLevel } from '../stats.js';
 import { drain, sleep } from './pipeline.js';
 import { say } from './progress.js';
 import { queueNote, targetSql } from './queue.js';
@@ -50,6 +50,12 @@ export async function refreshStats(scope = 'all') {
 	`);
 
 	const params = target.params;
+
+	// Раунды и число тёзок — по одному паку, на месте, а не в общем списке выше:
+	// раунды с образцами тем весят по десятку килобайт на пак, и список на пять
+	// тысяч паков, который drain перечитывает, тащил бы их все разом
+	const layout = db.prepare('SELECT rounds, stats_twins FROM packages WHERE id = ?');
+
 	const statsJobs = Math.max(1, config.statsJobs);
 
 	say(step, `запрашиваю ${pending.all(...params).length} паков${scope === 'new' ? ' без статистики' : ''}`
@@ -69,7 +75,7 @@ export async function refreshStats(scope = 'all') {
 				const raw = await fetchPackageStats(row.name, authors);
 
 				if (!raw) {
-					upsertStats.run(row.id, 0, 0, 0, 0, 0, 0, null, null, null, 0, Date.now());
+					upsertStats.run(row.id, 0, 0, 0, 0, 0, 0, null, null, null, 0, Date.now(), null);
 				} else {
 					const summary = summarize(raw);
 					const level = toLevel(summary);
@@ -79,6 +85,14 @@ export async function refreshStats(scope = 'all') {
 					}
 
 					found++;
+
+					// По темам — только у пака, которому статистика принадлежит одному.
+					// У тёзок она общая на всех (см. stats_twins в src/db.js), и места
+					// «раунд:тема» в ней — от разных файлов сразу
+					const own = layout.get(row.id);
+					const themes = own && own.stats_twins <= 1
+						? themeStats(raw, JSON.parse(own.rounds ?? '[]'))
+						: null;
 
 					upsertStats.run(
 						row.id,
@@ -93,6 +107,7 @@ export async function refreshStats(scope = 'all') {
 						level,
 						1,
 						Date.now(),
+						themes ? JSON.stringify(themes) : null,
 					);
 				}
 			} catch (error) {

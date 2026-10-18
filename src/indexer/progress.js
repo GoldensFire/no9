@@ -171,6 +171,7 @@ export const TAGS = {
 	specials: 'спецвопросы',
 	prints: 'отпечатки',
 	durations: 'длительность',
+	formats: 'форматы',
 	hyx: 'SI-HYX',
 	authors: 'авторы',
 	copies: 'копии',

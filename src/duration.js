@@ -796,7 +796,7 @@ export function probeDurationAt(name, chunk, size, from) {
 }
 
 /** Имя записи архива как оно читается человеком: без percent-кодировки и без папки. */
-function plainName(name) {
+export function plainName(name) {
 	try {
 		return decodeURIComponent(name);
 	} catch {

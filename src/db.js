@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS stats (
 	take_percent REAL,
 	level INTEGER,
 	found INTEGER NOT NULL DEFAULT 0,
-	updated_at INTEGER
+	updated_at INTEGER,
+	themes TEXT
 );
 
 CREATE INDEX IF NOT EXISTS ix_stats_level ON stats (level);
@@ -143,6 +144,20 @@ CREATE INDEX IF NOT EXISTS ix_pack_authors_key ON pack_authors (author_key);
    не отличить — сорок восемь байт делится и на то, и на другое, — а второй
    от третьего не отличить ничем вовсе, у них разное правило при одной длине
    (см. PRINTS_VERSION в src/plagiarism.js). */
+/* Из чего сделано медиа пака: форматы картинок и звука, кодеки видео — счётом
+   по файлам, JSON {images, audio, containers, video} (см. src/media-formats.js).
+   Видит это хозяин сайта и хранилище; посетителю карточки оно ни о чём не говорит.
+   Своей таблицей, а не колонкой packages: та в D1 упёрлась в сто столбцов ответа
+   (см. «Дозаливка колонок» ниже). Строки нет — «ещё не смотрели»; у пака без
+   медиа строка есть, с пустыми объектами, иначе он стоял бы в очереди шага
+   каждую ночь. checked_at — когда смотрели: пак, перезалитый позже, смотрится
+   заново. Уезжает наверх вместе с packages (см. TABLES в scripts/export-d1.js) */
+CREATE TABLE IF NOT EXISTS pack_formats (
+	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
+	formats TEXT NOT NULL,
+	checked_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pack_prints (
 	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
 	prints BLOB NOT NULL,
@@ -270,7 +285,16 @@ db.prepare(`
 	VALUES (?, 'local', 'Этот компьютер', NULL, NULL, ?, ?)
 `).run(LOCAL_USER_ID, Date.now(), Date.now());
 
-// Дозаливка колонок в базы, созданные более ранней версией
+// Дозаливка колонок в базы, созданные более ранней версией.
+//
+// Новая колонка packages — не бесплатная, и дело не в месте. Наверху эта
+// таблица живёт в D1, а D1 не отдаёт больше ста столбцов в одном ответе.
+// Выдача сайта спрашивает «p.*» и полтора десятка добавок к нему (см. listPackages
+// и getPackage в cf/src/library/packs.js), и на 17.10.2026 при 84 колонках это
+// 99–100 столбцов — ровно на пределе. Ещё одна колонка, и каждый запрос выдачи
+// отвечает «too many columns in result set», то есть сайт не показывает ни одного
+// пака. Новому полю пака место в своей таблице рядом (как pack_formats или
+// themes у stats), а не здесь
 const existingColumns = new Set(db.prepare(`PRAGMA table_info(packages)`).all().map(c => c.name));
 
 for (const [name, definition] of [
@@ -680,6 +704,26 @@ export function markObscene(where = '', params = []) {
 // в scripts/deploy/author-names.js). Нужна она здесь затем, чтобы сборка статики
 // и ночной обход звали автора тем же именем, что и сайт (см. src/author-names.js)
 db.exec(AUTHOR_NAMES_TABLE_SQL);
+
+// Дозаливка колонок в статистику
+{
+	const columns = new Set(db.prepare(`PRAGMA table_info(stats)`).all().map(c => c.name));
+
+	for (const [name, definition] of [
+		// Те же числа сервиса, сведённые по темам пака: JSON-массив раундов,
+		// в каждом — по [показано, отвечали, верно, неверно] на тему, null у темы,
+		// про которую сервис не знает ничего (см. themeStats в src/stats.js).
+		// NULL целиком — показов нет, раскладка у сервиса чужая или пак делит
+		// статистику с тёзками. Здесь, а не в packages: меняется вместе
+		// с остальной статистикой и тем же шагом, и строка stats и так уезжает
+		// наверх всякий раз, когда в пак сыграли
+		['themes', 'TEXT'],
+	]) {
+		if (!columns.has(name)) {
+			db.exec(`ALTER TABLE stats ADD COLUMN ${name} ${definition}`);
+		}
+	}
+}
 
 // Дозаливка колонок в свёртку отпечатков
 {

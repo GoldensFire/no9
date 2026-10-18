@@ -1,5 +1,5 @@
 // Досчёт того, чего у старых паков нет: отпечатки вопросов, длительность медиа,
-// спецвопросы, следы SI-HYX.
+// форматы медиа, спецвопросы, следы SI-HYX.
 //
 // Все три считает разбор — но только новым пакам. Паку, разобранному до того,
 // как правило появилось, переразбор не нужен: он переписал бы заодно и всё
@@ -12,13 +12,14 @@ import { openRemoteZip } from '../zip.js';
 import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
+import { measureFormats } from '../media-formats.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { force, jobs, reprints } from './options.js';
 import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
 import { say } from './progress.js';
 import { queueNote, targetSql } from './queue.js';
 import { isChosen } from './steps.js';
-import { storeDurations, storePrints, storeRounds, updateHyx, updateSpecials } from './store.js';
+import { storeDurations, storeFormats, storePrints, storeRounds, updateHyx, updateSpecials } from './store.js';
 
 /**
  * Досчитывает отпечатки вопросов у паков, разобранных до того, как их научились
@@ -275,6 +276,80 @@ export async function fetchDurations() {
 	});
 
 	say('durations', `померено у ${ok} паков, из них с медиа ${withMedia}, файлов в них ${files}`
+		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
+}
+
+/**
+ * Форматы медиа: картинки и звук по расширениям, видео по кодеку
+ * (см. src/media-formats.js).
+ *
+ * Дешевле длительности впятеро: оглавление архива на каждый пак и поход
+ * на видеофайл, а не на всякий медиафайл, — видео в библиотеке вшестеро
+ * меньше, чем звука, и у шести паков из десяти его нет вовсе. Новым пакам
+ * считает этот же шаг в ночном забеге за свежим, старым — один раз.
+ *
+ * Идти обязан следом за обходом обсуждений — по той же причине, что
+ * и длительность: ссылки ВК подписаны и живут недолго (см. fetchDurations).
+ */
+export async function fetchFormats() {
+	const target = targetSql();
+	const missing = force
+		? ''
+		: ' AND (f.package_id IS NULL OR f.checked_at < COALESCE(p.indexed_at, 0))';
+
+	const pending = db.prepare(`
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		LEFT JOIN pack_formats f ON f.package_id = p.id
+		WHERE p.status = 'ok'${missing}${target.where}
+		ORDER BY p.id
+	`);
+
+	const params = target.params;
+	const waiting = pending.all(...params).length;
+
+	say('formats', `не смотрены форматы у ${waiting} паков${queueNote(false)}`
+		+ `${jobs > 1 ? `, по ${jobs} разом` : ''}`);
+
+	let ok = 0;
+	let failed = 0;
+	let dead = 0;
+	let videos = 0;
+
+	await drain({
+		step: 'formats',
+		jobs,
+		take: () => pending.all(...params),
+		work: async (row, bar) => {
+			try {
+				const formats = await retryNetwork(() => withFreshUrl(row, async url => measureFormats(await openRemoteZip(url))));
+
+				storeFormats(row.id, formats);
+				ok++;
+
+				const codecs = Object.entries(formats.video);
+
+				if (codecs.length > 0) {
+					videos += codecs.reduce((sum, [, count]) => sum + count, 0);
+					say('formats', `${bar.label()} ${row.name ?? row.file_name}: видео `
+						+ codecs.map(([codec, count]) => `${codec} ×${count}`).join(', '));
+				}
+			} catch (error) {
+				if (buryDeadLink(row, error)) {
+					dead++;
+				} else {
+					failed++;
+				}
+
+				say('formats', `${row.name ?? row.file_name}: ${error.message}`);
+			}
+
+			if (bar.milestone(25)) {
+				say('formats', bar.line);
+			}
+		},
+	});
+
+	say('formats', `посмотрено ${ok} паков, видеофайлов в них ${videos}`
 		+ `${dead ? `, похоронено по мёртвой ссылке ${dead}` : ''}, ошибок ${failed}.`);
 }
 

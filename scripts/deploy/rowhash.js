@@ -54,6 +54,8 @@ export const digest = text => crypto.createHash('sha1').update(text).digest('hex
 export const SKIP = {
 	packages: ['plagiarism_at'],
 	stats: ['updated_at'],
+	// Пересмотренный пак с теми же форматами наверх не едет: изменилось одно время
+	pack_formats: ['checked_at'],
 };
 
 /**

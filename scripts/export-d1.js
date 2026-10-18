@@ -3,7 +3,7 @@
 // Ключи: --full   выгрузить всё заново, с заменой таблиц;
 //        --commit запомнить, что выгруженное доехало (зовётся из deploy-cf.js).
 //
-// Что уезжает наверх: packages, stats, pack_authors — всё, что собирает
+// Что уезжает наверх: packages, stats, pack_formats, pack_authors — всё, что собирает
 // индексатор. Что не уезжает никогда: users, sessions, ratings, blacklist,
 // played. Это не наша база, а то, что накопили посетители, и живёт оно только
 // в D1 (см. cf/schema.sql). Заливка их не трогает — иначе каждая выкладка
@@ -50,10 +50,10 @@ const dbPath = path.join(root, 'data', 'sibase.db');
 const outPath = path.join(root, 'cf', 'data');
 
 /**
- * Порядок важен: stats и pack_authors ссылаются на packages, поэтому создаются
- * позже него, а удаляются раньше.
+ * Порядок важен: stats, pack_formats и pack_authors ссылаются на packages,
+ * поэтому создаются позже него, а удаляются раньше.
  */
-const TABLES = ['packages', 'stats', 'pack_authors'];
+const TABLES = ['packages', 'stats', 'pack_formats', 'pack_authors'];
 
 /**
  * Насколько длинным можно отпускать один запрос, байты. Считаем по объёму,
@@ -416,6 +416,7 @@ function main() {
 		const alive = {
 			packages: new Set(db.prepare('SELECT id FROM packages').all().map(row => row.id)),
 			stats: new Set(db.prepare('SELECT package_id FROM stats').all().map(row => row.package_id)),
+			pack_formats: new Set(db.prepare('SELECT package_id FROM pack_formats').all().map(row => row.package_id)),
 			pack_authors: new Set(db.prepare('SELECT DISTINCT package_id FROM pack_authors').all().map(row => row.package_id)),
 		};
 
@@ -430,11 +431,11 @@ function main() {
 		}
 	}
 
-	// ————— packages и stats —————
+	// ————— packages, stats и pack_formats —————
 
 	// Какие колонки в отпечаток не входят — и почему их две, — сказано там же,
 	// где считается сам отпечаток (см. SKIP в scripts/deploy/rowhash.js).
-	for (const [table, key] of [['packages', 'id'], ['stats', 'package_id']]) {
+	for (const [table, key] of [['packages', 'id'], ['stats', 'package_id'], ['pack_formats', 'package_id']]) {
 		const skip = SKIP[table] ?? [];
 
 		if (whole) {

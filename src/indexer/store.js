@@ -381,10 +381,20 @@ export function storeDurations(packageId, media) {
 	);
 }
 
+const updateFormats = db.prepare(`
+	INSERT INTO pack_formats (package_id, formats, checked_at) VALUES (?, ?, ?)
+	ON CONFLICT (package_id) DO UPDATE SET formats = excluded.formats, checked_at = excluded.checked_at
+`);
+
+/** Форматы медиа пака (см. measureFormats в src/media-formats.js). */
+export function storeFormats(packageId, formats) {
+	updateFormats.run(packageId, JSON.stringify(formats), Date.now());
+}
+
 export const upsertStats = db.prepare(`
 	INSERT INTO stats (package_id, started_games, completed_games, shown, answered, correct, wrong,
-		right_percent, take_percent, level, found, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		right_percent, take_percent, level, found, updated_at, themes)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT (package_id) DO UPDATE SET
 		started_games = excluded.started_games,
 		completed_games = excluded.completed_games,
@@ -396,5 +406,6 @@ export const upsertStats = db.prepare(`
 		take_percent = excluded.take_percent,
 		level = excluded.level,
 		found = excluded.found,
-		updated_at = excluded.updated_at
+		updated_at = excluded.updated_at,
+		themes = excluded.themes
 `);
