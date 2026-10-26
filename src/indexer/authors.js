@@ -8,6 +8,7 @@
 
 import { db } from '../db.js';
 import { APPLY_CHOSEN_NAMES_SQL } from '../author-names.js';
+import { pullHiddenPacks, readReuploadPacks } from '../../scripts/deploy/hidden.js';
 import { say } from './progress.js';
 
 // ————— один автор — один человек —————
@@ -78,23 +79,47 @@ import { say } from './progress.js';
  * встречающаяся лишь в совместных паках, страницы не получает вовсе и ни с кем
  * не сливается. Опечатки (seenByAccount) по-прежнему видят все паки: там
  * страница — лишь подтверждение похожего написания, а не довод сама по себе.
+ *
+ * ————— и отдельно: перезаливы —————
+ *
+ * Та же беда, что у совместных паков, только со стороны: чужой человек
+ * перевыложил пак — и подпись автора встретилась на второй странице ВК.
+ * У Abr1koZ 107 паков с его собственной страницы и три перезалива с чужих:
+ * два хозяин сайта снял как «Самозванец», третий шаг copies признал копией его
+ * же пака. Подпись осталась без страницы, и вошедший через ВК автор получил
+ * один пак из ста с лишним.
+ *
+ * Поэтому страницу ВК подписи не дают и такие паки: копия (status = 'copy' —
+ * на сайте остаётся самая ранняя выкладка, см. src/indexer/copies.js) и пак,
+ * снятый наверху за то, что выложил его не автор («Самозванец», «Дубликат»).
+ * Снятые за плагиат довод сохраняют: плагиат выкладывает сам подписавшийся.
+ * Снятые живут только в D1 (см. setPackHidden в cf/src/library/moderation.js),
+ * и список привозится перед шагом тем же ходом, каким его забирает выкладка
+ * (см. REUPLOAD_PACKS_FILE в scripts/deploy/hidden.js). Не привёзся — берётся
+ * прошлая копия.
  */
-export function mergeAuthors() {
+export async function mergeAuthors() {
+	await pullHiddenPacks();
+
+	const reuploads = readReuploadPacks();
+
 	// Строка на «подпись под паком, выложенным с этого аккаунта». Мёртвые
 	// и похороненные паки в счёт идут наравне с живыми: аккаунт, с которого
 	// выкладывали, остаётся тем же аккаунтом, а вот подпись, встречающаяся
 	// только у мёртвого пака, без них потеряла бы своего человека
 	//
 	// shared — пак совместный: подписей под ним больше одной. Его аккаунт
-	// подписи не достаётся (см. «совместные паки» выше)
+	// подписи не достаётся (см. «совместные паки» выше). reupload — копия или
+	// пак, снятый как выложенный не автором: тоже (см. «перезаливы»)
 	const rows = db.prepare(`
 		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account,
 			(SELECT COUNT(*) FROM pack_authors b WHERE b.package_id = a.package_id) > 1 AS shared,
+			(p.status = 'copy' OR CAST(COALESCE(p.copy_of, p.id) AS TEXT) IN (SELECT value FROM json_each(?))) AS reupload,
 			COUNT(*) AS packs,
 			SUM(CASE WHEN p.status = 'ok' THEN 1 ELSE 0 END) AS live
 		FROM pack_authors a JOIN packages p ON p.id = a.package_id
-		GROUP BY a.author_key, a.author, p.vk_author_url, shared
-	`).all();
+		GROUP BY a.author_key, a.author, p.vk_author_url, shared, reupload
+	`).all(JSON.stringify(reuploads));
 
 	/**
 	 * Подпись -> {написания, из них живые, аккаунты одиночных паков,
@@ -115,6 +140,12 @@ export function mergeAuthors() {
 		item.packs += row.packs;
 
 		const account = (row.account ?? '').trim();
+
+		// Перезалив не говорит о подписи ничего: страница чужая, и даже как
+		// подтверждение опечатки она не годится
+		if (row.reupload) {
+			continue;
+		}
 
 		if (account) {
 			item.seen.add(account);

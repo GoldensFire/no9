@@ -26,6 +26,30 @@ import { askRows } from './d1.js';
 export const HIDDEN_PACKS_FILE = path.join(root, '.wrangler', 'hidden-packs.json');
 
 /**
+ * Где лежат снятые за то, что выложил их не автор: самозванец, дубликат
+ * чужой выкладки. Их читает слияние авторов — страница ВК, с которой такой пак
+ * выложен, о подписи под ним не говорит ничего (см. «перезаливы» у mergeAuthors
+ * в src/indexer/authors.js). Снятые за плагиат сюда не попадают: плагиат
+ * выкладывает тот, кто под ним подписался, и его страница — честный довод.
+ */
+export const REUPLOAD_PACKS_FILE = path.join(root, '.wrangler', 'reupload-packs.json');
+
+/**
+ * Какие ярлыки снятия значат «выложил не автор». Ярлыки хозяин сайта заводит
+ * сам (см. web/purge-panel.js), поэтому узнаются по началу слова.
+ */
+const NOT_BY_AUTHOR = /самозван|дублик|перезалив/i;
+
+/** Ключи из последней привезённой копии списка. Нет файла — пусто. */
+export function readReuploadPacks() {
+	try {
+		return JSON.parse(fs.readFileSync(REUPLOAD_PACKS_FILE, 'utf8')).map(String);
+	} catch {
+		return [];
+	}
+}
+
+/**
  * Привезти ключи снятых паков. Не вышло — остаётся прошлая копия: рейтинг
  * поживёт со вчерашним списком до следующей выкладки, срывать из-за этого
  * всю выкладку несоразмерно.
@@ -34,15 +58,17 @@ export async function pullHiddenPacks() {
 	let rows;
 
 	try {
-		rows = await askRows('SELECT pack_key FROM hidden_packs');
+		rows = await askRows('SELECT pack_key, reason FROM hidden_packs');
 	} catch (error) {
 		console.log(`Снятые паки наверху прочитать не вышло (${error.message}). Беру прежний список.`);
 		return;
 	}
 
 	const keys = rows.map(row => String(row.pack_key));
+	const reuploads = rows.filter(row => NOT_BY_AUTHOR.test(row.reason ?? '')).map(row => String(row.pack_key));
 
 	fs.mkdirSync(path.dirname(HIDDEN_PACKS_FILE), { recursive: true });
 	fs.writeFileSync(HIDDEN_PACKS_FILE, JSON.stringify(keys), 'utf8');
-	console.log(`Снятых с публикации паков: ${keys.length}.`);
+	fs.writeFileSync(REUPLOAD_PACKS_FILE, JSON.stringify(reuploads), 'utf8');
+	console.log(`Снятых с публикации паков: ${keys.length}, из них выложенных не автором: ${reuploads.length}.`);
 }

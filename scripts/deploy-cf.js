@@ -39,6 +39,7 @@
 //   drift.js      сверка: не разошлось ли лежащее наверху с тем, что база
 //                 считает отправленным
 //   hidden.js     список снятых с публикации паков — домой, для сборки
+//   moves.js      триггеры журнала pack_moves: паки, ушедшие из выдачи
 //   rowhash.js    отпечаток строки — один на выгрузку и на сверку
 //   site.js       по какому адресу сайт открывается наверху
 //   works.js      плашка «идут работы» и проверка живости после выкладки
@@ -55,6 +56,7 @@ import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
 import { pullAuthorNames, pushAuthorNames } from './deploy/author-names.js';
 import { pullHiddenPacks } from './deploy/hidden.js';
+import { createMoveTriggers } from './deploy/moves.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { recrawl } from './recrawl.js';
 import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
@@ -160,10 +162,16 @@ async function main() {
 	// а паки тем временем добавляет обход в Actions прямо наверх: выложенная
 	// с отставшей базы, статика знала не всех авторов, и у новых на карточке
 	// стоял «1 пак» при двух настоящих (готовый счёт author-packs.txt
-	// собирается отсюда, см. countsFromAssets в cf/src/library/packs.js).
+	// собирается отсюда, см. countsFromAssets в cf/src/library/author-counts.js).
 	// В Actions «только база», и полку там забирает сам ночной обход
 	if (!dbOnly) {
 		console.log('\n───── Сверка с полкой ─────');
+
+		// С этой минуты база дома — снимок того, что лежит наверху. Всё, что
+		// наверху сменится позже, сборка уже не увидит, и число паков у авторов
+		// Worker поправит по журналу pack_moves начиная отсюда (см. withPackMoves
+		// в cf/src/library/author-counts.js). Сборка берёт время из окружения
+		process.env.FIREPACKS_SNAPSHOT_AT = String(Date.now());
 
 		const synced = spawnSync(process.execPath, ['--no-warnings', 'scripts/state.js', 'sync'], {
 			cwd: root,
@@ -254,6 +262,10 @@ async function main() {
 	// который заливка не трогает (см. cf/hidden.sql).
 	console.log('\n───── Снятые с публикации ─────');
 	await pour('cf/hidden.sql');
+
+	// Журнал ухода паков из выдачи — после паков и после снятых: полная заливка
+	// пересоздаёт packages вместе с триггерами (см. scripts/deploy/moves.js)
+	await createMoveTriggers();
 
 	// То же самое с никами авторов: заливка вернула строкам подписей домашние
 	// имена, а выбор, сделанный за время выкладки, дома ещё неизвестен
