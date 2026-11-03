@@ -40,7 +40,7 @@ export const knownInComment = db.prepare(`
 `);
 
 /** Есть ли такой документ в базе вообще — хоть под этим сообщением, хоть под другим. */
-export const knownDocument = db.prepare('SELECT id FROM packages WHERE source_key = ?');
+export const knownDocument = db.prepare('SELECT id, vk_topic, status FROM packages WHERE source_key = ?');
 
 /**
  * Живые паки одной темы обсуждения — все, каким бы сообщением они ни были

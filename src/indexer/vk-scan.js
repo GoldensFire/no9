@@ -88,7 +88,29 @@ function syncComment(comment, useApi, tally) {
 			// лежит теперь; решать, переезд это или один документ, честно
 			// висящий сразу в двух сообщениях, будет тот, кто прочитал тему
 			// целиком (см. missingComments)
-			if (knownDocument.get(document.key) !== undefined) {
+			const known = knownDocument.get(document.key);
+
+			// Но если прежнее сообщение уже похоронено, судить там некого:
+			// missingComments спрашивает только живые строки, и пак так и лежал
+			// бы мёртвым под удалённым номером. Так пропали пять солянок Zoobart
+			// (21659–21663): сообщение 1110 удалили, строки похоронили, а 2 ноября
+			// 2026 те же файлы выложили сообщениями 1255–1259. Сомнений здесь нет,
+			// и полный обход для этого не нужен: файла в старом сообщении нет,
+			// это уже установлено, — а в новом он есть. Оживляем сразу, как markBack
+			if (known?.status === 'gone' && known.vk_topic === comment.topicUrl) {
+				rebindComment.run(comment.id, comment.author, comment.authorUrl, comment.date,
+					comment.ts ?? parseVkDate(comment.date), comment.text, known.id);
+
+				if (useApi) {
+					refreshLink.run(document.url, document.fileName, document.fileTs ?? null, document.key);
+				}
+
+				tally.back++;
+				say('vk', `похороненный пак перевыложен сообщением ${comment.id}: ${document.fileName}`);
+				continue;
+			}
+
+			if (known !== undefined) {
 				tally.moved.set(document.key, comment);
 				continue;
 			}
