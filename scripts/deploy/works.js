@@ -23,9 +23,45 @@
 // вместо того чтобы вернуться через десять минут. Плашка говорит ему то, что
 // есть на самом деле.
 
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { askDatabase } from './d1.js';
+import { dataPath } from './options.js';
 import { siteOrigin } from './site.js';
 import { CLOUDFLARE_ENV, sleep } from './wrangler.js';
+
+/**
+ * Сломает ли нынешняя заливка сайт на время работ — то есть звать ли плашку.
+ *
+ * Ломает только полная: она начинается со сноса таблиц (DROP TABLE, см.
+ * scripts/export-d1.js), и до конца заливки в выдаче половина паков. Обычная же
+ * ночная или ежечасная заливка досылает изменившиеся строки поверх живых —
+ * каждый пак меняется одной вставкой, и посетитель ничего не замечает. Плашка
+ * при ней горела каждую ночь и рассказывала о работах, которых для человека
+ * не было (ноябрь 2026, владелец попросил так не делать).
+ *
+ * Снос, если он есть, стоит в самом начале первого файла — дальше читать незачем.
+ */
+export function pourBreaksSite() {
+	try {
+		const first = fs.readdirSync(dataPath).filter(name => name.endsWith('.sql')).sort()[0];
+
+		if (!first) {
+			return false;
+		}
+
+		const file = fs.openSync(path.join(dataPath, first), 'r');
+		const head = Buffer.alloc(64 * 1024);
+		const size = fs.readSync(file, head, 0, head.length, 0);
+		fs.closeSync(file);
+
+		return /DROP TABLE/i.test(head.toString('utf8', 0, size));
+	} catch {
+		// Не прочиталось — пусть лучше лишняя плашка, чем молчаливая поломка
+		return true;
+	}
+}
 
 /**
  * Можно ли вообще писать в базу наверху отсюда.

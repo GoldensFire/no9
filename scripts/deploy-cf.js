@@ -59,7 +59,7 @@ import { pullHiddenPacks } from './deploy/hidden.js';
 import { createMoveTriggers } from './deploy/moves.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { recrawl } from './recrawl.js';
-import { siteHealthy, worksOff, worksOn } from './deploy/works.js';
+import { pourBreaksSite, siteHealthy, worksOff, worksOn } from './deploy/works.js';
 
 /**
  * Положить базу на полку — ту самую, с которой её берёт запуск сайта дома
@@ -244,9 +244,17 @@ async function main() {
 	// Ничего от этого не теряется — до сих пор шли выгрузка базы и сборка
 	// статики, то есть работа дома, снаружи не видная вовсе. Заметное начинается
 	// со следующей строки.
-	if (!local) {
+	//
+	// Выкладке «только база» (ночь и ежечасный обход в Actions) плашка нужна,
+	// только если заливка полная: построчная досылка сайт не ломает,
+	// и говорить людям о работах незачем (см. pourBreaksSite в deploy/works.js)
+	const works = !local && (!dbOnly || pourBreaksSite());
+
+	if (works) {
 		console.log('\n───── Технические работы ─────');
 		await worksOn();
+	} else if (!local) {
+		console.log('\nПлашку работ не зажигаем: база досылается построчно, сайт работает как работал.');
 	}
 
 	logos();
@@ -285,8 +293,11 @@ async function main() {
 		console.log('\nБаза залита. Сам сайт не трогали.');
 
 		// Работы кончились ровно здесь: базу перелили, а сайт этой командой
-		// и не трогали вовсе
-		await worksOff();
+		// и не трогали вовсе. Не зажигали — и гасить нечего: чужую плашку
+		// (домашняя выкладка в ту же минуту) ночь гасить не должна
+		if (works) {
+			await worksOff();
+		}
 
 		if (toShelf) {
 			shelve();

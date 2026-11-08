@@ -48,8 +48,8 @@ export const INLINE_SCRIPT_HASHES = [
 	// Метка «скрипты работают» и тёмная тема: везде и на «не найдено»
 	'sha256-GvPVtexK9ESpBp5bGgnjD134Qc0EW9180GBO/ZIdz/k=',
 	'sha256-u9/CaosSZehlAJ99yrQpdqu/XReKMSeVJKBpCPZlQ8o=',
-	// Ходка за выдачей с первых строк главной
-	'sha256-DZfls+1+7cBrlfB18HidMv0+vybLkzCDM8aXMhGXp4s=',
+	// Ходка за выдачей с первых строк главной и мерка места под баннер над ней
+	'sha256-PX0iQqZGXTJlu3keF1IX/jCTcoLm1KjRVTHMzGG5me8=',
 	// window.libraryEmbedded = true — профиль
 	'sha256-AdQeLZoJQp0rlkEc96UaJv9NKEypo5BHhvKXbMZrN18=',
 	// initTopbar() — на страницах без своего скрипта, из-под DOMContentLoaded:
@@ -57,6 +57,11 @@ export const INLINE_SCRIPT_HASHES = [
 	'sha256-f2OgeMTCDtY6nkOEIPk9pxFOcM7qYHqi5TyxeAOokaQ=',
 	// Счётчик Яндекс.Метрики
 	'sha256-bI489q0eurIMH4NrGWTz2xuNDsc5S/pTQNqu38P3F7c=',
+	// Правила подгрузки страницы пака по нажатию на ссылку — <script
+	// type="speculationrules"> на страницах с карточками (web/index.html и соседи).
+	// Встроенные правила браузер пропускает только по отпечатку, как и скрипты:
+	// слово 'inline-speculation-rules' Chrome 152 не принял (проверено 05.11.2026)
+	'sha256-xzLNaI2wm4jaH7JYzG4WEwg59Jq2+elDhl4BxSssiw4=',
 	// window.homeBoot=1 — дописывает Worker, в собранной вёрстке его нет
 	'sha256-ZQjD6zOIX5NDWV99vf7VGztKWqYq5KKwoF5KKpi43ew=',
 ];
