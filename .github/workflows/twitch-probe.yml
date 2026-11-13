@@ -1,0 +1,82 @@
+# Этап 0 плана «стримы Twitch под паками»: пускают ли Twitch (GQL, usher,
+# сегменты CDN) и SullyGnome с адресов GitHub и сколько стоит OCR одного
+# кадра на раннере.
+#
+# Только ручной запуск. Базы не берёт, на полку и в D1 не пишет, ключей
+# не просит — поэтому и очередь своя, не firepacks-state: ночному
+# и ежечасному обходу не мешает. Итог — таблица на странице запуска,
+# тексты OCR — в приложении к запуску (три дня).
+#
+# Когда этап 0 пройден, файл удаляется вместе со scripts/twitch-probe.js.
+
+name: Проба Twitch
+
+on:
+  workflow_dispatch:
+    inputs:
+      vod:
+        description: 'Номер записи Twitch. Пусто — самая длинная SIGame из категории.'
+        required: false
+        default: ''
+      frames:
+        description: 'Сколько кадров снять и распознать'
+        required: false
+        default: '8'
+
+concurrency:
+  group: twitch-probe
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # Так же, как ImageMagick в nightly.yml: замок apt ждётся две минуты,
+      # вопросов нет, и через десять минут шаг снимают.
+      - name: Поставить ffmpeg и tesseract
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends ffmpeg tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+
+      # Для сравнения с тем, что ставит apt: быстрые модели из официального
+      # репозитория Tesseract. Не скачались — проба идёт без них.
+      - name: Скачать tessdata_fast
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/tessdata_fast"
+          for l in rus eng; do
+            curl -fsSL -o "$RUNNER_TEMP/tessdata_fast/$l.traineddata" \
+              "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/$l.traineddata"
+          done
+          ls -l "$RUNNER_TEMP/tessdata_fast"
+
+      - name: Проба
+        env:
+          VOD: ${{ inputs.vod }}
+          FRAMES: ${{ inputs.frames }}
+        run: |
+          node --no-warnings scripts/twitch-probe.js \
+            ${VOD:+--vod=$VOD} --frames="${FRAMES:-8}" \
+            --out="$RUNNER_TEMP/probe" --fast="$RUNNER_TEMP/tessdata_fast"
+
+      - name: Тексты OCR
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twitch-probe-ocr
+          path: ${{ runner.temp }}/probe/*.txt
+          retention-days: 3
+          if-no-files-found: ignore
