@@ -125,7 +125,7 @@ export async function scanVod(video, ctx) {
 	}
 
 	const hits = collectHits(shot);
-	const { packs, near, names } = judge(hits, ctx.index, collectNames(shot));
+	const { packs, near, names, inside } = judge(hits, ctx.index, collectNames(shot));
 	log(`  ${video.id}: ${shot.length} кадров${errors ? `, ошибок ${errors}` : ''}, тем ${hits.size}, паков ${packs.length}`);
 	return {
 		status: 'done',
@@ -140,6 +140,7 @@ export async function scanVod(video, ctx) {
 		packs,
 		near,
 		names,
+		inside,
 		ms: Date.now() - started,
 	};
 }

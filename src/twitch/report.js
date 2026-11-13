@@ -38,6 +38,8 @@ export function markdown({ alive, discovery, results, index, took }) {
 				verdict = r.packs.map(p => `✅ ${playLink(v, p)} «${p.pack.name}» #${p.pack.id}, ${p.themes} тем${p.name ? `, название на ${hm(p.name.at)}` : ''}${p.rival ? ` (рядом «${p.rival.pack.name}» #${p.rival.pack.id}, ${p.rival.themes})` : ''}`).join('<br>');
 				const near = r.near.filter(n => n.themes >= 1).slice(0, 2).map(n => `«${n.pack.name}» #${n.pack.id} ×${n.themes}: ${n.names.slice(0, 3).join('; ')}`);
 				if (near.length) verdict += `${verdict ? '<br>' : ''}<sub>не дотянули: ${near.join(' · ')}</sub>`;
+				const inside = (r.inside || []).map(p => `«${p.pack.name}» #${p.pack.id} ×${p.themes} внутри «${p.host.pack.name}»`);
+				if (inside.length) verdict += `${verdict ? '<br>' : ''}<sub>отброшены: ${inside.join(' · ')}</sub>`;
 				const named = (r.names || []).map(n => `«${n.pack.name}» #${n.pack.id} на ${hm(n.at)} («${n.seen}»)`);
 				if (named.length) verdict += `${verdict ? '<br>' : ''}<sub>название без тем: ${named.join(' · ')}</sub>`;
 				if (!verdict) verdict = '—';
@@ -61,6 +63,7 @@ export function details({ video, res, source }) {
 		id: video.id, channel: video.channel, title: video.title, createdAt: video.createdAt, length: video.length, source,
 		status: res.status, error: res.error, mode: res.mode, windows: res.windows, frames: res.frames, signs: res.signs,
 		packs: (res.packs || []).map(p => ({ id: p.pack.id, name: p.pack.name, themes: p.themes, allThemes: p.allThemes, from: p.from, to: p.to, names: p.names, name: p.name, rival: p.rival && { id: p.rival.pack.id, name: p.rival.pack.name, themes: p.rival.themes } })),
+		inside: (res.inside || []).map(p => ({ id: p.pack.id, name: p.pack.name, themes: p.themes, from: p.from, to: p.to, names: p.names, host: p.host.pack.id })),
 		namesSeen: (res.names || []).map(n => ({ id: n.pack.id, name: n.pack.name, at: n.at, seen: n.seen })),
 		near: (res.near || []).map(n => ({ id: n.pack.id, name: n.pack.name, themes: n.themes, names: n.names })),
 		hits: [...(res.hits?.values() || [])].filter(h => h.th.distinctive || h.frames >= 2).sort((a, b) => a.first - b.first).map(h => ({

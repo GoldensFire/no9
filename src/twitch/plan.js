@@ -21,7 +21,7 @@
 //              марафона, Codenames под чужой категорией — plan.md TF, 6.2.1).
 
 /** Версия плана и сверки: другая — запись смотрится заново. */
-export const PLAN_VERSION = 'v2';
+export const PLAN_VERSION = 'v3';
 
 export const STEP = 120;
 export const COARSE = 600;

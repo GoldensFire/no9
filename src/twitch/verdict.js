@@ -13,7 +13,12 @@
 //   - редкое название пака на экране начала игры (5.3) снижает порог
 //     до двух опознающих тем, и таймкод тогда — время этого экрана.
 //     Не до одной: серии делят рубрики, а название соседней части
-//     встречалось на экране (список паков в конце стрима).
+//     встречалось на экране (список паков в конце стрима);
+//   - два пака одной записи не играются разом: пак, чей отрезок больше
+//     чем наполовину внутри отрезка более сильного, не засчитывается.
+//     Так попадались ответы: в «Horizon #1» есть «Песня по минусовке»,
+//     и имена исполнителей на экране ответа — темы «Музпака по тексту»
+//     (5 тем внутри трёх часов Horizon, первый проход 13.11.2026).
 
 /** Сколько опознающих тем нужно паку. */
 export const MIN_THEMES = 3;
@@ -128,10 +133,22 @@ export function judge(hits, index, names = new Map(), min = MIN_THEMES) {
 		.slice(0, 3)
 		.map(([key, s]) => ({ key, pack: index.packs.get(key), themes: s.length, names: s.map(id => hits.get(id).th.name) }));
 
+	// Внутри чужой игры: сильные первыми, слабый отбрасывается, если больше
+	// половины его отрезка занято уже принятым
+	const kept = [], inside = [];
+	for (const p of [...packs].sort((a, b) => b.themes - a.themes)) {
+		const len = Math.max(1, p.to - p.from);
+		const host = kept.find(k => Math.min(k.to, p.to) - Math.max(k.from, p.from) > len / 2);
+		if (host) inside.push({ ...p, host });
+		else kept.push(p);
+	}
+	packs.length = 0;
+	packs.push(...kept.sort((a, b) => a.from - b.from));
+
 	// Названия, которые видели, а пак так и не засчитан, — для итога
 	const taken2 = new Set(packs.map(p => p.key));
 	const shown = [...names].filter(([key]) => !taken2.has(key)).slice(0, 3)
 		.map(([key, n]) => ({ key, pack: index.packs.get(key), at: n.first, seen: n.seen }));
 
-	return { packs, near, names: shown };
+	return { packs, near, names: shown, inside };
 }
