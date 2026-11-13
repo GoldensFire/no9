@@ -671,3 +671,52 @@ CREATE TABLE IF NOT EXISTS site_state (
 	value TEXT NOT NULL,
 	updated_at INTEGER NOT NULL
 );
+
+-- ————— стримы Twitch под паками —————
+
+-- Какие записи Twitch уже просмотрены и чем кончилось — чтобы не смотреть
+-- дважды. Пишет только обход стримов (scripts/twitch.js, src/twitch/store.js);
+-- он же заводит таблицу сам перед записью: выкладка схему не применяет.
+--
+-- status: done — просмотрена; error — не вышло (повтор, пока tries < 3);
+-- subonly — только для подписчиков; gone — удалена. Другой plan_key
+-- (версия сверки) — повод смотреть заново, пока запись жива.
+CREATE TABLE IF NOT EXISTS twitch_vods (
+	vod_id TEXT PRIMARY KEY,
+	channel TEXT NOT NULL,
+	title TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	length_s INTEGER NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	frames INTEGER NOT NULL DEFAULT 0,
+	plan_key TEXT,
+	scanned_at INTEGER,
+	tries INTEGER NOT NULL DEFAULT 0,
+	error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at);
+
+-- Паки, сыгранные на стримах Twitch: что нашёл обход стримов на записи.
+-- Пишет тот же обход (src/twitch/store.js) и сам же заводит таблицу; читает
+-- страница пака (cf/src/library/streams.js) — нет таблицы, и полосы нет.
+--
+-- alive = 1 — запись жива и стоит в полосе со ссылкой на минуту игры;
+-- alive = 0 — Twitch её удалил (VOD живут 7–60 дней): строка остаётся
+-- историей и статистикой «играли на стримах N раз». pack_key — copy_of ?? id.
+CREATE TABLE IF NOT EXISTS pack_streams (
+	vod_id TEXT NOT NULL,
+	pack_key TEXT NOT NULL,
+	channel TEXT NOT NULL,
+	channel_name TEXT,
+	played_at INTEGER NOT NULL,
+	t_from INTEGER NOT NULL,
+	t_to INTEGER NOT NULL,
+	themes INTEGER NOT NULL,
+	alive INTEGER NOT NULL DEFAULT 1,
+	checked_at INTEGER NOT NULL,
+	PRIMARY KEY (vod_id, pack_key)
+);
+
+CREATE INDEX IF NOT EXISTS ix_pack_streams_pack ON pack_streams (pack_key, alive, played_at);

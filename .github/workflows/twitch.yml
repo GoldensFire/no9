@@ -1,0 +1,128 @@
+# Стримы Twitch под паками: каждую ночь, следом за ночным обходом базы.
+#
+# Что происходит: проверяется, живы ли записи, которые уже стоят в полосе под
+# паками (умершие уходят в историю); находятся свежие записи с SIGame —
+# категория Twitch, каналы по SullyGnome, каналы, где SIGame уже бывала;
+# с каждой снимаются кадры, распознаются Tesseract'ом и сверяются с темами
+# всей библиотеки. Что нашлось, ложится в D1 (pack_streams), и страница пака
+# показывает это сама — выкладывать сайт не нужно.
+#
+# Устройство — scripts/twitch.js и src/twitch/.
+#
+# Почему после ночного обхода, а не по часам: в словаре тем должны быть паки,
+# разобранные этой ночью. Базу берёт с полки только на чтение и обратно
+# не кладёт — поэтому и очередь своя, не firepacks-state: ежечасному обходу
+# не мешает и его не ждёт.
+#
+# Ключи — только Cloudflare (писать в D1). Twitch и SullyGnome ключей
+# не просят.
+
+name: Стримы Twitch
+
+on:
+  workflow_run:
+    workflows: ['Ночной обход базы']
+    types: [completed]
+
+  # Руками — со страницы Actions: проверить записи, пройти всё живое разом
+  # (первый проход), посмотреть, что найдётся, ничего не записывая.
+  workflow_dispatch:
+    inputs:
+      vods:
+        description: 'Номера записей через запятую. Пусто — найти самим.'
+        required: false
+        default: ''
+      all:
+        description: 'Первый проход: каналы SullyGnome за 90 дней, а не за 7'
+        type: boolean
+        default: false
+      rescan:
+        description: 'Смотреть заново и то, что уже смотрели'
+        type: boolean
+        default: false
+      dry:
+        description: 'Не читать и не писать D1'
+        type: boolean
+        default: false
+      minutes:
+        description: 'Сколько минут отпущено. Пусто — 240.'
+        required: false
+        default: ''
+
+concurrency:
+  group: twitch
+  cancel-in-progress: false
+
+jobs:
+  twitch:
+    runs-on: ubuntu-latest
+
+    # Предохранитель: своё время обход считает сам (--minutes) и недосмотренное
+    # оставляет на завтра. Шесть часов — потолок GitHub на задачу.
+    timeout-minutes: 350
+
+    permissions:
+      # Только скачать базу с полки — класть её обратно незачем
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      # Так же, как ImageMagick в nightly.yml: замок apt ждётся две минуты,
+      # вопросов нет, и через десять минут шаг снимают. Без них смотреть
+      # нечем, поэтому сбой здесь — сбой задачи. Модели tesseract из apt —
+      # быстрые (tessdata_fast): 0,73 с на кадр в один поток.
+      - name: Поставить ffmpeg и tesseract
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo -E apt-get -o DPkg::Lock::Timeout=120 install -y --no-install-recommends ffmpeg tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+
+      - run: npm ci
+
+      - name: Забрать базу с полки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --no-warnings scripts/state.js pull
+
+      - name: Смотреть стримы
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Через переменные, а не подстановкой в саму команду: то, что пришло
+          # из формы запуска, в строку оболочки попадать не должно
+          VODS: ${{ inputs.vods }}
+          ALL: ${{ inputs.all }}
+          RESCAN: ${{ inputs.rescan }}
+          DRY: ${{ inputs.dry }}
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          minutes=$(printf '%s' "$MINUTES" | tr -cd '0-9')
+          args="--out=$RUNNER_TEMP/twitch.json --minutes=${minutes:-240}"
+          if [ -n "$VODS" ]; then args="$args --vods=$(printf '%s' "$VODS" | tr -cd '0-9,')"; fi
+          if [ "$ALL" = "true" ]; then args="$args --all"; fi
+          if [ "$RESCAN" = "true" ]; then args="$args --rescan"; fi
+          if [ "$DRY" = "true" ]; then args="$args --dry"; fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] && [ "$DRY" != "true" ]; then
+            echo "::warning::Нет CLOUDFLARE_API_TOKEN — смотрю без D1"
+            args="$args --dry"
+          fi
+          node --no-warnings scripts/twitch.js $args
+
+      - name: Подробности
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: twitch
+          path: ${{ runner.temp }}/twitch.json
+          retention-days: 14
+          if-no-files-found: ignore
