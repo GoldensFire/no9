@@ -58,6 +58,15 @@ const COLUMNS = [
 	// На чей комментарий это ответ. Разговор под паком был плоским, ветки
 	// в нём появились вместе с этой колонкой (см. cf/src/library/comments.js).
 	['comments', 'parent_id', 'INTEGER'],
+	// Звенеть ли о разговоре под своим паком и о своём паке на стриме
+	// (панель «Уведомления» в настройках профиля, cf/src/library/preferences.js)
+	['user_settings', 'notify_comments', 'INTEGER NOT NULL DEFAULT 1'],
+	['user_settings', 'notify_streams', 'INTEGER NOT NULL DEFAULT 1'],
+	// Что держалось на экране всю игру и метка игры: две записи одного пака —
+	// одна совместная трансляция или разные (src/twitch/marks.js). Заводит их
+	// и сам обход стримов (src/twitch/store.js), кто бы ни пришёл первым
+	['pack_streams', 'marks', 'TEXT'],
+	['pack_streams', 'game', 'TEXT'],
 ];
 
 /**

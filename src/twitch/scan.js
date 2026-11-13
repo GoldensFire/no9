@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { grabFrame } from './frames.js';
 import { analyzeFrame } from './match.js';
+import { frameWords, marksOf, themeWordsOf } from './marks.js';
 import { linesOf } from './ocr.js';
 import { COARSE, grid, MAX_FRAMES, merge, openings, planKey, STEP, STRETCH, windowsOf } from './plan.js';
 import { openMedia, SubOnly } from './twitch.js';
@@ -64,8 +65,10 @@ export async function scanVod(video, ctx) {
 					}
 					if (ctx.cache) ((ctx.cache[video.id] ||= { video, frames: {} }).frames[t] = { at, raw });
 				}
-				const an = analyzeFrame(linesOf(raw), ctx.index);
-				frames.set(t, { t: at, matches: an.matches, names: an.names, sign: an.sign });
+				const lines = linesOf(raw);
+				const an = analyzeFrame(lines, ctx.index);
+				// words — для marks: что держалось на экране (src/twitch/marks.js)
+				frames.set(t, { t: at, matches: an.matches, names: an.names, sign: an.sign, words: frameWords(lines) });
 			}
 		};
 		await Promise.all(Array.from({ length: Math.min(DOWNLOADS + 2, todo.length) }, worker));
@@ -126,6 +129,9 @@ export async function scanVod(video, ctx) {
 
 	const hits = collectHits(shot);
 	const { packs, near, names, inside } = judge(hits, ctx.index, collectNames(shot));
+	// Что держалось на экране, пока шёл пак: по этому обход потом решает,
+	// одна это игра с другой записью того же пака или нет (src/twitch/marks.js)
+	for (const p of packs) p.marks = marksOf(shot, p, themeWordsOf(ctx.index, p.key));
 	log(`  ${video.id}: ${shot.length} кадров${errors ? `, ошибок ${errors}` : ''}, тем ${hits.size}, паков ${packs.length}`);
 	return {
 		status: 'done',

@@ -92,6 +92,13 @@ const ADS_FRAMES = 'https://yandexadexchange.net https://*.yandexadexchange.net'
 const INSIGHTS_BEACON = 'https://cloudflareinsights.com';
 
 /**
+ * Плеер Twitch: записи стримов смотрят прямо на сайте, рамкой
+ * player.twitch.tv (см. web/twitch-player.js). Что внутри рамки — дело
+ * Twitch: её собственные скрипты и картинки правило страницы не касается.
+ */
+const TWITCH_PLAYER = 'https://player.twitch.tv';
+
+/**
  * Откуда берутся значки людей. У Discord адрес складывается из номера учётной
  * записи и отпечатка картинки, у ВК приходит готовым (см. avatarUrl
  * в cf/src/auth/session.js), и хосты у ВК не один: значки лежат на sun*.userapi.com,
@@ -120,8 +127,8 @@ const AVATARS = 'https://cdn.discordapp.com https://*.userapi.com https://*.vk.c
  *                карточки, который рисует canvas (см. web/card-shot.js).
  *   connect-src  своё API и оба счётчика — Метрика ещё и постоянным
  *                соединением, отсюда отдельный wss.
- *   frame-src    вебвизор Метрики открывает свою рамку. Своих рамок на сайте
- *                нет ни одной.
+ *   frame-src    вебвизор Метрики открывает свою рамку, объявление РСЯ — свою,
+ *                плеер Twitch под паком и на странице записей — свою.
  *   frame-ancestors 'none'  — вот это и закрывает /admin от кликджекинга,
  *                и закрывает надёжнее, чем X-Frame-Options: тот про весь сайт
  *                говорит одно слово, а этот понимает и «кроме своих».
@@ -144,7 +151,7 @@ const CSP = [
 	`style-src 'self' 'unsafe-inline' https://yastatic.net https://*.adfox.ru`,
 	`img-src 'self' data: blob: ${AVATARS} ${METRIKA} ${ADS}`,
 	`connect-src 'self' blob: ${METRIKA} ${METRIKA_WS} ${METRIKA_COM} ${INSIGHTS_BEACON} ${ADS}`,
-	`frame-src ${METRIKA} ${ADS} ${ADS_FRAMES}`,
+	`frame-src ${METRIKA} ${ADS} ${ADS_FRAMES} ${TWITCH_PLAYER}`,
 	`media-src 'self' blob: data: ${ADS}`,
 	// Объявление приходит со своим шрифтом с yastatic.net. Отдельной строкой
 	// потому, что своих шрифтов у сайта нет вовсе и до сих пор про них молчал

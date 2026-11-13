@@ -12,7 +12,7 @@ import { ocrPool, ocrWorkers } from './ocr.js';
 import { windowsOf } from './plan.js';
 import { details, markdown, windowsText, writeSummary } from './report.js';
 import { scanVod } from './scan.js';
-import { aliveVods, ensureSchema, knownChannels, knownVods, markAlive, savePackStreams, saveVods } from './store.js';
+import { aliveVods, ensureSchema, knownChannels, knownVods, linkGames, markAlive, notifyStreamOwners, savePackStreams, saveVods } from './store.js';
 import { deadVideos, videosById } from './twitch.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -119,7 +119,12 @@ export async function run(o = options()) {
 			if (useD1 && res.status !== 'skip' && !item.gone) {
 				// Сначала паки, потом отметка «просмотрена»: оборвись запуск между
 				// ними — запись просто посмотрят ещё раз
-				if (res.status === 'done') await savePackStreams(v, res.packs);
+				if (res.status === 'done') {
+					const fresh = await savePackStreams(v, res.packs);
+					await linkGames(v, res.packs);
+					const sent = await notifyStreamOwners(v, fresh);
+					if (sent) console.log(`  звонков авторам: ${sent}`);
+				}
 				await saveVods([{ ...v, source: item.source, status: res.status, frames: res.frames, planKey: res.planKey, error: res.error }]);
 			}
 			if (o.saveOcr && cache) fs.writeFileSync(o.saveOcr, JSON.stringify(cache));

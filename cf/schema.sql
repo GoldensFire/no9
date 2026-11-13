@@ -585,10 +585,16 @@ CREATE INDEX IF NOT EXISTS ix_friends_back ON friends (friend_id);
 -- по умолчанию — «видно всем». Отдельная таблица, а не колонки в users,
 -- потому что users переписывается входом (имя и аватар обновляются с каждым
 -- приходом), и настройке там не место.
+--
+-- notify_comments, notify_streams — звенеть ли колокольчику о разговоре
+-- под своим паком и о своём паке на стриме Twitch (панель «Уведомления»
+-- в настройках профиля). По умолчанию звенит.
 CREATE TABLE IF NOT EXISTS user_settings (
 	user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
 	private_lists INTEGER NOT NULL DEFAULT 0,
-	updated_at INTEGER NOT NULL
+	updated_at INTEGER NOT NULL,
+	notify_comments INTEGER NOT NULL DEFAULT 1,
+	notify_streams INTEGER NOT NULL DEFAULT 1
 );
 
 
@@ -705,6 +711,12 @@ CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at);
 -- alive = 1 — запись жива и стоит в полосе со ссылкой на минуту игры;
 -- alive = 0 — Twitch её удалил (VOD живут 7–60 дней): строка остаётся
 -- историей и статистикой «играли на стримах N раз». pack_key — copy_of ?? id.
+--
+-- marks — что держалось на экране всю игру, кроме тем пака: ники игроков
+-- на табло, подписи оверлея (слова через пробел); game — метка игры: у строк
+-- одной совместной трансляции она одна. Сверяет и ставит их обход стримов
+-- (src/twitch/marks.js, linkGames в src/twitch/store.js). Пусто — запись
+-- сама по себе игра; так и у строк, записанных до 13.11.2026.
 CREATE TABLE IF NOT EXISTS pack_streams (
 	vod_id TEXT NOT NULL,
 	pack_key TEXT NOT NULL,
@@ -716,6 +728,8 @@ CREATE TABLE IF NOT EXISTS pack_streams (
 	themes INTEGER NOT NULL,
 	alive INTEGER NOT NULL DEFAULT 1,
 	checked_at INTEGER NOT NULL,
+	marks TEXT,
+	game TEXT,
 	PRIMARY KEY (vod_id, pack_key)
 );
 
