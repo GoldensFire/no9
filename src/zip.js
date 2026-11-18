@@ -379,6 +379,10 @@ function parseCentralDirectory(buffer) {
 
 	while (position + 46 <= buffer.length && buffer.readUInt32LE(position) === CENTRAL_SIGNATURE) {
 		const method = buffer.readUInt16LE(position + 10);
+		// Контрольная сумма развёрнутого файла. Вместе с размером — ключ, по
+		// которому одинаковый файл узнаётся в другом паке ещё до скачивания
+		// (см. nsfw-moderation.md, раздел 2.2)
+		const crc = buffer.readUInt32LE(position + 16);
 		const compressedSize = buffer.readUInt32LE(position + 20);
 		// Размер файла как он лежит на диске у автора пака. Нужен дважды:
 		// по нему считается вес медиафайла (см. src/plagiarism.js — одинаковое имя
@@ -391,7 +395,7 @@ function parseCentralDirectory(buffer) {
 		const localOffset = buffer.readUInt32LE(position + 42);
 		const name = buffer.subarray(position + 46, position + 46 + nameLength).toString('utf8');
 
-		entries.push({ name, method, compressedSize, size, localOffset });
+		entries.push({ name, method, crc, compressedSize, size, localOffset });
 		position += 46 + nameLength + extraLength + commentLength;
 	}
 

@@ -91,6 +91,39 @@ export function noteGeminiFailure(step, error, model) {
 	say(step, stopReason(error));
 }
 
+/**
+ * Модель перегружена и после всех повторов: перейти на другую, если запуску
+ * это разрешено (--fallback), — и тогда шаг спрашивает про те же паки ещё раз.
+ *
+ * Нужно ежечасному обходу: у него пак один, а следующий запуск GitHub может
+ * отложить на полдня, и пак всё это время висит на сайте без типа и описания.
+ * Ночь ключа --fallback не берёт и этим не пользуется: у неё неразмеченное
+ * подберёт следующая ночь, а менять модель из-за минутного всплеска незачем.
+ *
+ * @returns {boolean} перешли ли на другую модель
+ */
+export function overloadSwitch(step, error, model) {
+	if (error.overloaded !== true || !fallback) {
+		return false;
+	}
+
+	// Другой работник уже переключил — повторяем на той, что стоит сейчас
+	if (model !== activeModel()) {
+		return true;
+	}
+
+	const next = nextSpareModel(model, { any: fallbackAny });
+
+	if (!next) {
+		return false;
+	}
+
+	useModel(next);
+	say(step, `${model} перегружена — перехожу на ${next}. ${usageLine(next)}`);
+
+	return true;
+}
+
 /** Что написать, сворачивая полосу. Кончившиеся лимиты — не поломка. */
 function stopReason(error) {
 	return error.quota === true

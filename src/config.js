@@ -223,6 +223,16 @@ export const config = {
 	geminiKey: readSecret('GEMINI_API_KEY', 'gemini-key.txt'),
 
 	/**
+	 * Ключ Gemini для модерации 18+ — из отдельного проекта Google, не тот, что
+	 * выше. Через него едут тысячи откровенных картинок, и если Google закроет
+	 * за это проект, ночная разметка не должна встать вместе с ним (решение 4.5
+	 * в nsfw-moderation.md). Кладётся в data/gemini-mod-key.txt или в переменную
+	 * GEMINI_MOD_KEY. Ключом разметки модерация не пользуется никогда — даже
+	 * когда этого нет.
+	 */
+	geminiModKey: readSecret('GEMINI_MOD_KEY', 'gemini-mod-key.txt'),
+
+	/**
 	 * Вход через Discord. Приложение заводится на https://discord.com/developers/applications,
 	 * там же в OAuth2 → Redirects прописывается адрес возврата (см. discordRedirectUri).
 	 * Идентификатор и секрет кладутся в data/discord-client-id.txt и data/discord-client-secret.txt

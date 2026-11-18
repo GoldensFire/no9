@@ -8,14 +8,14 @@ const ENTITIES = {
 	'&apos;': "'",
 };
 
-function decodeXml(value) {
+export function decodeXml(value) {
 	return value
 		.replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
 		.replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(parseInt(code, 10)))
 		.replace(/&(amp|lt|gt|quot|apos);/g, m => ENTITIES[m]);
 }
 
-function parseAttributes(source) {
+export function parseAttributes(source) {
 	const attributes = {};
 	const pattern = /([\w:.-]+)\s*=\s*"([^"]*)"/g;
 	let match;
@@ -27,7 +27,7 @@ function parseAttributes(source) {
 	return attributes;
 }
 
-function collectTexts(source, tag) {
+export function collectTexts(source, tag) {
 	const pattern = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'g');
 	const result = [];
 	let match;
@@ -239,7 +239,7 @@ function countSpecials(body) {
 }
 
 /** Разбивает кусок XML на области по открывающему тегу. */
-function splitByTag(source, tag) {
+export function splitByTag(source, tag) {
 	const pattern = new RegExp(`<${tag}\\b([^>]*)>`, 'g');
 	const starts = [];
 	let match;
@@ -571,7 +571,7 @@ const themeQuestions = themeBody => (themeBody.match(/<question[\s>]/g) ?? []).l
  * Совсем пустая тема (ни имени, ни вопросов) выбрасывается по-прежнему:
  * это остаток редактирования, за столом его не было.
  */
-const keptTheme = theme => Boolean(theme.attributes.name) || themeQuestions(theme.body) > 0;
+export const keptTheme = theme => Boolean(theme.attributes.name) || themeQuestions(theme.body) > 0;
 
 function parseRounds(body) {
 	const rounds = [];

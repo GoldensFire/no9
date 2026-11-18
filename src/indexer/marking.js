@@ -23,7 +23,7 @@ import {
 	listThemes, computeShares, toPrimary, computeFranchises, computeAreas, computeHolidays,
 	computeOtherKinds, computeGenres, computeForms, computeDecades, computeOrigin,
 } from '../topics.js';
-import { geminiQuotaSpent, geminiReady, noteGeminiFailure } from './model.js';
+import { geminiQuotaSpent, geminiReady, noteGeminiFailure, overloadSwitch } from './model.js';
 import { reparse, resummary, retopics, upgrade } from './options.js';
 import { drain } from './pipeline.js';
 import { say } from './progress.js';
@@ -485,14 +485,29 @@ export async function refreshAnalysis() {
 				label: bar.label(),
 			}));
 
-			const model = activeModel();
+			let model = activeModel();
 
 			try {
-				const answers = await analyzePacks(packs.map(pack => ({
+				const ask = () => analyzePacks(packs.map(pack => ({
 					name: pack.row.name ?? '',
 					about: pack.row.comment_text ?? '',
 					themes: pack.themes,
 				})));
+
+				let answers;
+
+				try {
+					answers = await ask();
+				} catch (error) {
+					// Перегружена — ещё раз другой моделью, если запуску можно
+					// переходить (см. overloadSwitch в src/indexer/model.js)
+					if (!overloadSwitch('analyze', error, model)) {
+						throw error;
+					}
+
+					model = activeModel();
+					answers = await ask();
+				}
 
 				packs.forEach(({ row, themes, label }, index) => {
 					const answer = answers[index];

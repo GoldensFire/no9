@@ -734,3 +734,91 @@ CREATE TABLE IF NOT EXISTS pack_streams (
 );
 
 CREATE INDEX IF NOT EXISTS ix_pack_streams_pack ON pack_streams (pack_key, alive, played_at);
+
+-- ————— конкурс паков —————
+--
+-- Автор с привязанной страницей ВК присылает пак прямо на сайт, жюри его
+-- скачивает, играет и ставит оценку, а остальные видят, кто из жюри сыграл
+-- и сколько поставил. Сами файлы лежат не здесь, а в приватной корзине R2
+-- (привязка CONTEST в wrangler.jsonc); после конкурса они стираются, а строки
+-- остаются — по ним видно, что было прислано и как оценено. Замысел и расчёт
+-- бесплатного объёма — contest-uploads.md, код — cf/src/library/contest-*.js.
+--
+-- contest_id — какой это конкурс ('newyear-2026'): его задаёт хозяин в /admin,
+-- и страница показывает работы только текущего.
+
+-- Жюри. Роль без привязки к конкурсу: хозяин назначает и снимает руками
+CREATE TABLE IF NOT EXISTS jury (
+	user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+	added_at INTEGER NOT NULL
+);
+
+-- Присланные работы — строка на человека и конкурс: повторная загрузка
+-- заменяет файл в той же строке, а не заводит вторую. status: done — файл
+-- лежит в R2; deleted — конкурс кончился и файлы стёрты (строка остаётся ради
+-- итогов). Отозванная работа стирается строкой вместе с соавторами и оценками
+CREATE TABLE IF NOT EXISTS contest_entries (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	contest_id TEXT NOT NULL,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	vk_id TEXT NOT NULL,
+	title TEXT NOT NULL,
+	r2_key TEXT NOT NULL,
+	file_name TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	status TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE (contest_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_contest_entries_contest ON contest_entries (contest_id, status);
+
+-- Загрузки, ещё не собранные в файл. Место под пак бронируется здесь
+-- по заявленному размеру: незаконченная загрузка в R2 тоже занимает место.
+-- Корзина сама добивает брошенные через сутки, а строка старше суток
+-- в брони не считается и стирается при следующем старте
+CREATE TABLE IF NOT EXISTS contest_uploads (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	contest_id TEXT NOT NULL,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	r2_key TEXT NOT NULL,
+	upload_id TEXT NOT NULL,
+	size INTEGER NOT NULL,
+	file_name TEXT NOT NULL,
+	title TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_contest_uploads_user ON contest_uploads (user_id);
+
+-- Уже принятые куски загрузки: у привязки R2 нет списка частей, а без него
+-- оборвавшуюся загрузку не продолжить с места обрыва
+CREATE TABLE IF NOT EXISTS contest_parts (
+	upload_id INTEGER NOT NULL REFERENCES contest_uploads (id) ON DELETE CASCADE,
+	part INTEGER NOT NULL,
+	etag TEXT NOT NULL,
+	PRIMARY KEY (upload_id, part)
+);
+
+-- Соавторы работы. Человек — в одной работе на конкурс, загрузившим
+-- или соавтором; это проверяет код (см. cf/src/library/contest-entries.js)
+CREATE TABLE IF NOT EXISTS contest_coauthors (
+	entry_id INTEGER NOT NULL REFERENCES contest_entries (id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	PRIMARY KEY (entry_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_contest_coauthors_user ON contest_coauthors (user_id);
+
+-- Отметки жюри: сыграл и оценка 1–10, как ratings.score (полшага звезды —
+-- балл). NULL — сыграл, но ещё не оценил. Снятый с жюри человек своих строк
+-- не теряет: итог не должен меняться оттого, что жюри распустили
+CREATE TABLE IF NOT EXISTS contest_scores (
+	entry_id INTEGER NOT NULL REFERENCES contest_entries (id) ON DELETE CASCADE,
+	jury_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	played INTEGER NOT NULL DEFAULT 0,
+	score INTEGER CHECK (score BETWEEN 1 AND 10),
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (entry_id, jury_id)
+);

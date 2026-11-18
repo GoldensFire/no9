@@ -452,6 +452,14 @@ let allowThinkingOff = true;
  */
 const MAX_QUOTA_WAIT_MS = 30_000;
 
+/** Пауза после «модель перегружена», умножается на номер попытки: 15 с, 30 с. */
+const OVERLOAD_WAIT_MS = 15_000;
+
+/** Отказ «модель перегружена»: дело не в нас и не в лимитах, а в чужом всплеске. */
+function isOverloaded(error) {
+	return error.status === 503 || /high demand|overloaded|UNAVAILABLE/i.test(error.message ?? '');
+}
+
 export async function ask(prompt, schema, options = {}) {
 	let lastError = null;
 
@@ -536,6 +544,23 @@ export async function ask(prompt, schema, options = {}) {
 				error.fatal = true;
 				error.quota = true;
 				throw error;
+			}
+
+			// Модель перегружена («This model is currently experiencing high
+			// demand», 503 UNAVAILABLE). Всплеск у Google длится десятки секунд,
+			// и прежние паузы в две-пять секунд он переживал целиком: 18.11.2026
+			// пак 21817 так и уехал на сайт без разметки — три отказа подряд
+			// за восемь секунд. Ждём дольше, а не сдавшись — помечаем отказ,
+			// чтобы шаг мог спросить другую модель (см. overloadSwitch
+			// в src/indexer/model.js)
+			if (isOverloaded(error)) {
+				error.overloaded = true;
+
+				if (attempt < config.geminiRetries) {
+					await sleep(OVERLOAD_WAIT_MS * attempt);
+				}
+
+				continue;
 			}
 
 			if (attempt < config.geminiRetries) {
