@@ -103,6 +103,14 @@ export function noteGeminiFailure(step, error, model) {
  * @returns {boolean} перешли ли на другую модель
  */
 export function overloadSwitch(step, error, model) {
+	// Запасная, на которую перешли от перегрузки, может тут же ответить
+	// «суточные кончились» (18.11.2026: flash-lite перегружена, у 3.8-flash
+	// квоты на бесплатном ключе нет) — тогда идём к следующей тем же путём,
+	// что и при кончившихся лимитах
+	if (error.quota === true) {
+		return switchModel(step, model);
+	}
+
 	if (error.overloaded !== true || !fallback) {
 		return false;
 	}

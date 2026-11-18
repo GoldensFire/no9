@@ -496,17 +496,20 @@ export async function refreshAnalysis() {
 
 				let answers;
 
-				try {
-					answers = await ask();
-				} catch (error) {
-					// Перегружена — ещё раз другой моделью, если запуску можно
-					// переходить (см. overloadSwitch в src/indexer/model.js)
-					if (!overloadSwitch('analyze', error, model)) {
-						throw error;
-					}
+				// Перегружена или кончились сутки — ещё раз другой моделью, если
+				// запуску можно переходить (см. overloadSwitch в src/indexer/model.js).
+				// До трёх моделей: первая запасная сама бывает без квоты
+				for (let tries = 0; ; tries++) {
+					try {
+						answers = await ask();
+						break;
+					} catch (error) {
+						if (tries >= 3 || !overloadSwitch('analyze', error, model)) {
+							throw error;
+						}
 
-					model = activeModel();
-					answers = await ask();
+						model = activeModel();
+					}
 				}
 
 				packs.forEach(({ row, themes, label }, index) => {
