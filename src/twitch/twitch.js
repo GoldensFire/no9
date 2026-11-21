@@ -5,13 +5,15 @@
 // и с раннера GitHub (twitch-streams.md, 3.2 и 3.6). Запросы — plan.md
 // TwitchFinder, 10.1–10.2.
 
+import { isSigame, isSvoyakShow, SIGAME_TITLE_RE } from './plan.js';
+
 const CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 export const HEADERS = { 'User-Agent': UA };
 
 const CHAPTERS = `moments(momentRequestType: VIDEO_CHAPTER_MARKERS){ edges{ node{ positionMilliseconds durationMilliseconds
   details{ ... on GameChangeMomentDetails{ game{ name } } } } } }`;
-const VIDEO = `id title lengthSeconds createdAt status game{ name } owner{ login displayName } ${CHAPTERS}`;
+const VIDEO = `id title lengthSeconds createdAt status viewCount game{ name } owner{ login displayName } ${CHAPTERS}`;
 
 async function post(body, tries = 3) {
 	for (let i = 1; ; i++) {
@@ -42,6 +44,7 @@ export async function gql(query, variables = {}) {
 export async function gqlBatch(items) {
 	const out = [];
 	for (let i = 0; i < items.length; i += 30) {
+		if (i > 0) await new Promise(res => setTimeout(res, 250));
 		const part = items.slice(i, i + 30);
 		const res = await post(part);
 		if (!Array.isArray(res)) throw new Error(`GQL: на пачку пришёл не массив: ${JSON.stringify(res).slice(0, 200)}`);
@@ -59,6 +62,7 @@ export function videoOf(node) {
 		length: node.lengthSeconds || 0,
 		createdAt: Date.parse(node.createdAt),
 		status: node.status || '',
+		views: Number.isFinite(node.viewCount) ? node.viewCount : null,
 		game: node.game?.name || '',
 		channel: node.owner?.login || '',
 		channelName: node.owner?.displayName || node.owner?.login || '',
@@ -103,23 +107,84 @@ export async function videosById(ids) {
 }
 
 /**
- * Какие записи из списка Twitch уже не отдаёт. Умершей считается только
- * та, на которую GQL ответил «такой нет» (video: null); упавший кусок
- * пачки — не ответ, и такие записи остаются живыми до завтра: иначе
- * минутный сбой Twitch стёр бы полосу у всех паков разом.
+ * Запросы для поиска VOD через GQL searchFor.
+ * «si game» с пробелом нарочно не включён: Twitch ищет по отдельным словам
+ * и тащит поток испаноязычных стримов (si + game).
  */
-export async function deadVideos(ids) {
+export const SEARCH_QUERIES = ['sigame', 'сигейм', 'своя игра', 'свою игру', 'своячок', 'свояк'];
+
+/**
+ * Поиск архивных VOD по ключевым словам в GQL searchFor.
+ * Главы здесь не запрашиваются — их добирает discover.js через channelVideos()
+ * или videosById(). Сортировка в searchFor по релевантности, а не строго по дате,
+ * поэтому остановка идёт по maxPages, а старые записи отсеиваются по since.
+ */
+export async function searchVideos(queries = SEARCH_QUERIES, { maxPages = 5, since = 0 } = {}) {
+	const out = [];
+	const seen = new Set();
+	let first = true;
+	for (const q of queries) {
+		let cursor = null;
+		for (let page = 0; page < maxPages; page++) {
+			if (!first) await new Promise(res => setTimeout(res, 200));
+			first = false;
+			const d = await gql(`query($q: String!, $c: String) {
+				searchFor(userQuery: $q, platform: "web", target: { index: VOD, cursor: $c }) {
+					videos {
+						items {
+							id title lengthSeconds createdAt status viewCount broadcastType
+							game { name }
+							owner { login displayName }
+						}
+						cursor
+					}
+				}
+			}`, { q, c: cursor });
+			const box = d?.searchFor?.videos;
+			const items = box?.items || [];
+			for (const node of items) {
+				if (!node) continue;
+				if (node.broadcastType && node.broadcastType !== 'ARCHIVE') continue;
+				const v = videoOf(node);
+				if (!v || seen.has(v.id)) continue;
+				if (since && v.createdAt < since) continue;
+				if (!SIGAME_TITLE_RE.test(v.title) && !isSigame(v.game)) continue;
+				if (isSvoyakShow(v)) continue;
+				seen.add(v.id);
+				out.push(v);
+			}
+			cursor = box?.cursor || null;
+			if (!cursor || !items.length) break;
+		}
+	}
+	return out;
+}
+
+/**
+ * Какие записи из списка Twitch уже не отдаёт и сколько просмотров у живых.
+ * Умершей считается только та, на которую GQL ответил «такой нет» (video: null);
+ * упавший кусок пачки — не ответ, и такие записи остаются живыми до завтра:
+ * иначе минутный сбой Twitch стёр бы полосу у всех паков разом.
+ */
+export async function checkVideos(ids) {
 	const dead = [];
+	const views = [];
 	for (let i = 0; i < ids.length; i += 30) {
 		const part = ids.slice(i, i + 30);
-		const res = await post(part.map(id => ({ query: 'query($id:ID!){ video(id:$id){ id } }', variables: { id } })));
+		const res = await post(part.map(id => ({ query: 'query($id:ID!){ video(id:$id){ id viewCount } }', variables: { id } })));
 		if (!Array.isArray(res)) continue;
 		part.forEach((id, k) => {
 			const r = res[k];
-			if (r && !r.errors?.length && r.data && r.data.video === null) dead.push(id);
+			if (!r || r.errors?.length || !r.data) return;
+			if (r.data.video === null) dead.push(id);
+			else if (Number.isFinite(r.data.video.viewCount)) views.push([id, r.data.video.viewCount]);
 		});
 	}
-	return dead;
+	return { dead, views };
+}
+
+export async function deadVideos(ids) {
+	return (await checkVideos(ids)).dead;
 }
 
 export class SubOnly extends Error {}

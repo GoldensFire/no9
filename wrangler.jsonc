@@ -265,11 +265,15 @@
 		"enabled": true
 	},
 
-	// Раз в сутки, в 03:00 UTC, — свежие значки Discord: отпечаток аватара
-	// приходит только при входе и устаревает, стоит человеку его сменить
-	// (см. cf/src/auth/avatar-refresh.js; нужен секрет DISCORD_BOT_TOKEN)
+	// Расписание Worker'а:
+	//   - "0 3 * * *" — раз в сутки, в 03:00 UTC: свежие значки Discord
+	//     (cf/src/auth/avatar-refresh.js; нужен секрет DISCORD_BOT_TOKEN)
+	//     и подчистка старых записей twitch_seen_channels;
+	//   - "*/20 * * * *" — раз в 20 минут: живые стримы категории SIGame через
+	//     Twitch Helix (cf/src/twitch-live.js; нужны секреты TWITCH_CLIENT_ID
+	//     и TWITCH_CLIENT_SECRET)
 	"triggers": {
-		"crons": ["0 3 * * *"]
+		"crons": ["0 3 * * *", "*/20 * * * *"]
 	}
 
 	// Ключи входов сюда не пишутся: они кладутся отдельно, командой

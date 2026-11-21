@@ -12,8 +12,8 @@ import { ocrPool, ocrWorkers } from './ocr.js';
 import { windowsOf } from './plan.js';
 import { details, markdown, windowsText, writeSummary } from './report.js';
 import { scanVod } from './scan.js';
-import { aliveVods, ensureSchema, knownChannels, knownVods, linkGames, markAlive, notifyStreamOwners, savePackStreams, saveVods } from './store.js';
-import { deadVideos, videosById } from './twitch.js';
+import { aliveVods, ensureSchema, knownChannels, knownVods, linkGames, markAlive, notifyStreamOwners, savePackStreams, saveVods, seenChannels } from './store.js';
+import { checkVideos, videosById } from './twitch.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -62,7 +62,7 @@ export async function run(o = options()) {
 	const since = started - HORIZON_DAYS * 864e5;
 	const useD1 = !o.dry;
 
-	let known = new Map(), channels = [];
+	let known = new Map(), channels = [], live = [];
 	let alive = null;
 	if (useD1) {
 		await ensureSchema();
@@ -73,6 +73,7 @@ export async function run(o = options()) {
 		}
 		known = await knownVods(since);
 		channels = await knownChannels(since);
+		live = await seenChannels(since);
 	}
 
 	// 1. Что смотреть
@@ -85,7 +86,7 @@ export async function run(o = options()) {
 		const videos = await videosById(o.vods);
 		items = videos.map((v, i) => v ? { video: v, source: 'вручную' } : { video: { id: o.vods[i], channel: '?', title: '', createdAt: 0, length: 0, chapters: [] }, gone: true });
 	} else {
-		discovery = await discover({ sullyDays: o.sullyDays, since, known, knownChannels: channels, rescan: o.rescan });
+		discovery = await discover({ sullyDays: o.sullyDays, since, known, knownChannels: channels, seenChannels: live, rescan: o.rescan });
 		items = discovery.todo;
 	}
 
@@ -145,8 +146,8 @@ export async function run(o = options()) {
 async function checkAlive() {
 	try {
 		const ids = await aliveVods();
-		const dead = ids.length ? await deadVideos(ids) : [];
-		await markAlive(dead);
+		const { dead, views } = ids.length ? await checkVideos(ids) : { dead: [], views: [] };
+		await markAlive(dead, views);
 		console.log(`живость: в полосе ${ids.length} записей, умерло ${dead.length}`);
 		return { checked: ids.length, dead: dead.length };
 	} catch (e) {

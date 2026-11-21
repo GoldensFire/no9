@@ -67,6 +67,9 @@ const COLUMNS = [
 	// и сам обход стримов (src/twitch/store.js), кто бы ни пришёл первым
 	['pack_streams', 'marks', 'TEXT'],
 	['pack_streams', 'game', 'TEXT'],
+	// Сколько просмотров у записи Twitch: приходит с GQL при обходе и сверке
+	// живости (src/twitch/twitch.js, src/twitch/store.js)
+	['twitch_vods', 'views', 'INTEGER'],
 ];
 
 /**

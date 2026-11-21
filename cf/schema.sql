@@ -699,7 +699,8 @@ CREATE TABLE IF NOT EXISTS twitch_vods (
 	plan_key TEXT,
 	scanned_at INTEGER,
 	tries INTEGER NOT NULL DEFAULT 0,
-	error TEXT
+	error TEXT,
+	views INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at);
@@ -734,6 +735,26 @@ CREATE TABLE IF NOT EXISTS pack_streams (
 );
 
 CREATE INDEX IF NOT EXISTS ix_pack_streams_pack ON pack_streams (pack_key, alive, played_at);
+
+-- Каналы, замеченные в живой категории SIGame поллером Worker'а
+-- (см. cf/src/twitch-live.js, расписание */20 * * * *). Ловит даже мелкие
+-- каналы с 0–1 зрителем, которые SullyGnome отсекает, и тех, у кого SIGame
+-- шла не первой игрой стрима. Старые строки (старше 61 дня) чистит ночной cron.
+CREATE TABLE IF NOT EXISTS twitch_seen_channels (
+	channel TEXT PRIMARY KEY,
+	seen_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_twitch_seen_at ON twitch_seen_channels (seen_at);
+
+-- Служебный кэш поллера Twitch Helix: app access token (helix_token, с запасом
+-- по сроку) и идентификатор игры SIGame (sigame_game_id, бессрочно), чтобы
+-- обычный запуск cron делал ровно один запрос к api.twitch.tv/helix/streams.
+CREATE TABLE IF NOT EXISTS twitch_kv (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	expires_at INTEGER
+);
 
 -- ————— конкурс паков —————
 --

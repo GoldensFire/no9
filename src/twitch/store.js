@@ -28,7 +28,8 @@ const SCHEMA = [
 		plan_key TEXT,
 		scanned_at INTEGER,
 		tries INTEGER NOT NULL DEFAULT 0,
-		error TEXT
+		error TEXT,
+		views INTEGER
 	)`,
 	'CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at)',
 	`CREATE TABLE IF NOT EXISTS pack_streams (
@@ -47,23 +48,35 @@ const SCHEMA = [
 		PRIMARY KEY (vod_id, pack_key)
 	)`,
 	'CREATE INDEX IF NOT EXISTS ix_pack_streams_pack ON pack_streams (pack_key, alive, played_at)',
+	`CREATE TABLE IF NOT EXISTS twitch_seen_channels (
+		channel TEXT PRIMARY KEY,
+		seen_at INTEGER NOT NULL
+	)`,
+	'CREATE INDEX IF NOT EXISTS ix_twitch_seen_at ON twitch_seen_channels (seen_at)',
+	`CREATE TABLE IF NOT EXISTS twitch_kv (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		expires_at INTEGER
+	)`,
 ];
 
 /** Сколько раз пробовать запись, которая не далась. */
 export const MAX_TRIES = 3;
 
 const str = v => (v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`);
-const num = v => (Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : 'NULL');
+const num = v => (v != null && v !== '' && Number.isFinite(Number(v)) ? String(Math.round(Number(v))) : 'NULL');
 
 export async function ensureSchema() {
 	for (const sql of SCHEMA) await askRows(sql);
-	// marks и game появились 13.11.2026, когда таблица уже жила: «IF NOT EXISTS»
-	// её не донесёт. Выкладка дописывает её тоже (scripts/deploy/columns.js) —
+	// marks, game и views появились, когда таблицы уже жили: «IF NOT EXISTS»
+	// их не донесёт. Выкладка дописывает их тоже (scripts/deploy/columns.js) —
 	// кто придёт первым
-	const [row] = await askRows("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pack_streams'");
+	const [psRow] = await askRows("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pack_streams'");
 	for (const column of ['marks', 'game']) {
-		if (row?.sql && !new RegExp(`\\b${column}\\b`).test(row.sql)) await askRows(`ALTER TABLE pack_streams ADD COLUMN ${column} TEXT`);
+		if (psRow?.sql && !new RegExp(`\\b${column}\\b`).test(psRow.sql)) await askRows(`ALTER TABLE pack_streams ADD COLUMN ${column} TEXT`);
 	}
+	const [vodRow] = await askRows("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'twitch_vods'");
+	if (vodRow?.sql && !/\bviews\b/.test(vodRow.sql)) await askRows('ALTER TABLE twitch_vods ADD COLUMN views INTEGER');
 }
 
 /** Записи, о которых уже есть строка, новее since (мс): номер → строка. */
@@ -78,8 +91,14 @@ export async function knownChannels(since) {
 	return rows.map(r => String(r.channel));
 }
 
+/** Каналы, замеченные в живой категории SIGame поллером Worker'а (cf/src/twitch-live.js). */
+export async function seenChannels(since) {
+	const rows = await askRows(`SELECT channel FROM twitch_seen_channels WHERE seen_at >= ${num(since)}`);
+	return rows.map(r => String(r.channel));
+}
+
 /**
- * @param {Array<{id, channel, title, createdAt, length, source, status, frames, planKey, error}>} rows
+ * @param {Array<{id, channel, title, createdAt, length, source, status, frames, planKey, error, views?}>} rows
  */
 export async function saveVods(rows) {
 	const now = Date.now();
@@ -87,13 +106,14 @@ export async function saveVods(rows) {
 		const values = rows.slice(i, i + 40).map(r => `(${[
 			str(r.id), str(r.channel), str((r.title || '').slice(0, 300)), num(r.createdAt), num(r.length), str(r.source || ''),
 			str(r.status), num(r.frames || 0), str(r.planKey ?? null), num(now), r.status === 'error' ? '1' : '0',
-			str(r.error ? String(r.error).slice(0, 300) : null),
+			str(r.error ? String(r.error).slice(0, 300) : null), num(r.views),
 		].join(', ')})`);
-		await askRows(`INSERT INTO twitch_vods (vod_id, channel, title, created_at, length_s, source, status, frames, plan_key, scanned_at, tries, error)
+		await askRows(`INSERT INTO twitch_vods (vod_id, channel, title, created_at, length_s, source, status, frames, plan_key, scanned_at, tries, error, views)
 			VALUES ${values.join(',\n')}
 			ON CONFLICT (vod_id) DO UPDATE SET
 				status = excluded.status, frames = excluded.frames, plan_key = excluded.plan_key,
 				scanned_at = excluded.scanned_at, error = excluded.error, title = excluded.title, length_s = excluded.length_s,
+				views = COALESCE(excluded.views, twitch_vods.views),
 				tries = CASE WHEN excluded.status = 'error' THEN twitch_vods.tries + 1 ELSE twitch_vods.tries END`);
 	}
 }
@@ -224,14 +244,24 @@ export async function aliveVods() {
 
 /**
  * Записи умерли: из полосы — вон, строка остаётся историей и статистикой
- * (решение 3 в twitch-streams.md). Живым — отметка, что проверены сегодня.
+ * (решение 3 в twitch-streams.md). Живым — отметка, что проверены сегодня,
+ * и свежие просмотры с Twitch.
+ *
+ * @param {string[]} dead
+ * @param {Array<[string, number]>} views
  */
-export async function markAlive(dead) {
+export async function markAlive(dead, views = []) {
 	const now = Date.now();
 	for (let i = 0; i < dead.length; i += 50) {
 		const ids = dead.slice(i, i + 50).map(str).join(', ');
 		await askRows(`UPDATE pack_streams SET alive = 0, checked_at = ${now} WHERE vod_id IN (${ids});
 			UPDATE twitch_vods SET status = 'gone' WHERE vod_id IN (${ids})`);
+	}
+	for (let i = 0; i < views.length; i += 40) {
+		const part = views.slice(i, i + 40);
+		const cases = part.map(([id, count]) => `WHEN ${str(id)} THEN ${num(count)}`).join(' ');
+		const ids = part.map(([id]) => str(id)).join(', ');
+		await askRows(`UPDATE twitch_vods SET views = CASE vod_id ${cases} ELSE views END WHERE vod_id IN (${ids})`);
 	}
 	await askRows(`UPDATE pack_streams SET checked_at = ${now} WHERE alive = 1`);
 }

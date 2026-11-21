@@ -60,10 +60,24 @@ export function openings(shots) {
 	return out;
 }
 
-const isSigame = name => /^si\s*game$/i.test(String(name || '').trim());
+export const isSigame = name => /^si\s*game$/i.test(String(name || '').trim());
 
 // Стримеры не всегда ставят категорию, а название обычно выдаёт игру
-export const SIGAME_TITLE_RE = /\bsi\s*-?\s*game|сигейм|си\s*гейм|сиг[еэ]йм|своя\s+игра|в\s+свою\s+игру|свояк|своячок/i;
+export const SIGAME_TITLE_RE = /\bsi\s*-?\s*game|си\s*-?\s*г[еэ]йм|своя\s+игра|свою\s+игру|своей\s+игр|свояк|своячок/i;
+
+// Просмотры YouTube-шоу «Свояк» и инди-разработка («делаю свою игру»):
+// не тратить кадры probe, если категория не SIGame
+export const SVOYAK_SHOW_RE = /(?<![а-яё])(?:смотрим|смотрю|реакт|реакция|разбор)(?![а-яё]).*свояк|(?<![а-яё])свояк(?![а-яё]).*(?<![а-яё])(?:коваль|сатир|малащенко|шоу)(?![а-яё])/i;
+const GAMEDEV_TITLE_RE = /(?<![а-яё])(?:дела[юе]|созда[юё]|разрабатыва[юе]|пиш[уе]|выпустил|выпуска[юе])\S*\s+свою\s+игру/i;
+const STRICT_SIGAME_RE = /\bsi\s*-?\s*game|си\s*-?\s*г[еэ]йм|свояк|своячок/i;
+
+export function isSvoyakShow(video) {
+	if (isSigame(video?.game)) return false;
+	const title = video?.title || '';
+	if (SVOYAK_SHOW_RE.test(title) || GAMEDEV_TITLE_RE.test(title)) return true;
+	if (/^software and game development$/i.test(String(video?.game || '').trim()) && !STRICT_SIGAME_RE.test(title)) return true;
+	return false;
+}
 
 /** Слить пересекающиеся отрезки. */
 export function merge(ranges) {
@@ -87,7 +101,7 @@ export function windowsOf(video) {
 	if (sig.length) {
 		return { mode: 'chapters', windows: merge(sig.map(c => [Math.max(0, c.from - PAD), Math.min(len, c.from + c.len + PAD)])) };
 	}
-	const titled = SIGAME_TITLE_RE.test(video.title);
+	const titled = SIGAME_TITLE_RE.test(video.title) && !isSvoyakShow(video);
 	if (video.chapters.length) {
 		return titled ? { mode: 'probe', windows: [[0, len]] } : { mode: null, reason: 'главы есть, SIGame среди них нет' };
 	}
