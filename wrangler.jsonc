@@ -269,11 +269,11 @@
 	//   - "0 3 * * *" — раз в сутки, в 03:00 UTC: свежие значки Discord
 	//     (cf/src/auth/avatar-refresh.js; нужен секрет DISCORD_BOT_TOKEN)
 	//     и подчистка старых записей twitch_seen_channels;
-	//   - "*/20 * * * *" — раз в 20 минут: живые стримы категории SIGame через
-	//     Twitch Helix (cf/src/twitch-live.js; нужны секреты TWITCH_CLIENT_ID
-	//     и TWITCH_CLIENT_SECRET)
+	//   - "*/10 * * * *" — раз в 10 минут: живые стримы категории SIGame и RU
+	//     Just Chatting через Twitch Helix (cf/src/twitch-live.js; нужны секреты
+	//     TWITCH_CLIENT_ID и TWITCH_CLIENT_SECRET)
 	"triggers": {
-		"crons": ["0 3 * * *", "*/20 * * * *"]
+		"crons": ["0 3 * * *", "*/10 * * * *"]
 	}
 
 	// Ключи входов сюда не пишутся: они кладутся отдельно, командой

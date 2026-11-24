@@ -28,7 +28,8 @@
     "recrawl": "node --no-warnings scripts/recrawl.js",
     "recrawl:dry": "node --no-warnings scripts/recrawl.js --dry",
     "deploy:logos": "node --no-warnings scripts/deploy-logos.js",
-    "twitch": "node --no-warnings scripts/twitch.js"
+    "twitch": "node --no-warnings scripts/twitch.js",
+    "youtube": "node --no-warnings scripts/youtube.js"
   },
   "engines": {
     "node": ">=22"

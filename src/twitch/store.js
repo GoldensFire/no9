@@ -13,7 +13,7 @@
 
 import { askRows } from '../../scripts/deploy/d1.js';
 import { PACK_KEY_SQL } from '../keys.js';
-import { commonWords, sameTable } from './marks.js';
+import { commonWords, isYoutubeVod, sameTable, YT_WINDOW_MS } from './marks.js';
 
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS twitch_vods (
@@ -29,7 +29,8 @@ const SCHEMA = [
 		scanned_at INTEGER,
 		tries INTEGER NOT NULL DEFAULT 0,
 		error TEXT,
-		views INTEGER
+		views INTEGER,
+		signs INTEGER
 	)`,
 	'CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at)',
 	`CREATE TABLE IF NOT EXISTS pack_streams (
@@ -53,6 +54,14 @@ const SCHEMA = [
 		seen_at INTEGER NOT NULL
 	)`,
 	'CREATE INDEX IF NOT EXISTS ix_twitch_seen_at ON twitch_seen_channels (seen_at)',
+	`CREATE TABLE IF NOT EXISTS twitch_seen_windows (
+		channel TEXT NOT NULL,
+		stream_id TEXT NOT NULL,
+		first_seen INTEGER NOT NULL,
+		last_seen INTEGER NOT NULL,
+		PRIMARY KEY (channel, stream_id)
+	)`,
+	'CREATE INDEX IF NOT EXISTS ix_twitch_seen_windows_last ON twitch_seen_windows (last_seen)',
 	`CREATE TABLE IF NOT EXISTS twitch_kv (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL,
@@ -76,29 +85,69 @@ export async function ensureSchema() {
 		if (psRow?.sql && !new RegExp(`\\b${column}\\b`).test(psRow.sql)) await askRows(`ALTER TABLE pack_streams ADD COLUMN ${column} TEXT`);
 	}
 	const [vodRow] = await askRows("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'twitch_vods'");
-	if (vodRow?.sql && !/\bviews\b/.test(vodRow.sql)) await askRows('ALTER TABLE twitch_vods ADD COLUMN views INTEGER');
+	for (const column of ['views', 'signs']) {
+		if (vodRow?.sql && !new RegExp(`\\b${column}\\b`).test(vodRow.sql)) await askRows(`ALTER TABLE twitch_vods ADD COLUMN ${column} INTEGER`);
+	}
 }
 
-/** Записи, о которых уже есть строка, новее since (мс): номер → строка. */
-export async function knownVods(since) {
-	const rows = await askRows(`SELECT vod_id, channel, status, plan_key, tries FROM twitch_vods WHERE created_at >= ${num(since)}`);
+/** Все уже известные записи (включая старые вечные HIGHLIGHT): номер → строка. */
+export async function knownVods() {
+	const rows = await askRows('SELECT vod_id, channel, status, plan_key, tries FROM twitch_vods');
 	return new Map(rows.map(r => [String(r.vod_id), r]));
 }
 
-/** Каналы, где SIGame уже находилась: их записи смотрим, даже если SullyGnome промолчал. */
+/** Каналы, где SIGame действительно находилась (без ложных probe с нулём признаков игры). */
 export async function knownChannels(since) {
-	const rows = await askRows(`SELECT DISTINCT channel FROM twitch_vods WHERE status = 'done' AND created_at >= ${num(since)}`);
+	const rows = await askRows(`SELECT DISTINCT channel FROM twitch_vods
+		WHERE status = 'done' AND created_at >= ${num(since)}
+			AND (
+				signs >= 5
+				OR vod_id IN (SELECT DISTINCT vod_id FROM pack_streams)
+				OR (signs IS NULL AND COALESCE(plan_key, '') NOT LIKE '%/probe/%')
+			)`);
 	return rows.map(r => String(r.channel));
 }
 
-/** Каналы, замеченные в живой категории SIGame поллером Worker'а (cf/src/twitch-live.js). */
+/** Заголовки подтверждённых SIGame-записей с @упоминаниями со-стримеров. */
+export async function knownTitles(since) {
+	const rows = await askRows(`SELECT title FROM twitch_vods
+		WHERE status = 'done' AND created_at >= ${num(since)} AND title LIKE '%@%'
+			AND (
+				signs >= 5
+				OR vod_id IN (SELECT DISTINCT vod_id FROM pack_streams)
+				OR (signs IS NULL AND COALESCE(plan_key, '') NOT LIKE '%/probe/%')
+			)`);
+	return rows.map(r => String(r.title));
+}
+
+/** Каналы, замеченные поллером Worker'а (cf/src/twitch-live.js), и время последнего снимка. */
 export async function seenChannels(since) {
-	const rows = await askRows(`SELECT channel FROM twitch_seen_channels WHERE seen_at >= ${num(since)}`);
-	return rows.map(r => String(r.channel));
+	const rows = await askRows(`SELECT channel, seen_at FROM twitch_seen_channels WHERE seen_at >= ${num(since)}`);
+	let latestAt = 0;
+	const channels = [];
+	for (const r of rows) {
+		channels.push(String(r.channel));
+		const t = Number(r.seen_at || 0);
+		if (t > latestAt) latestAt = t;
+	}
+	return { channels, latestAt };
+}
+
+/** Окна [firstSeen, lastSeen] живых стримов Just Chatting с заголовком/тегом SIGame. */
+export async function seenWindows(since) {
+	const rows = await askRows(`SELECT channel, first_seen, last_seen FROM twitch_seen_windows WHERE last_seen >= ${num(since)}`);
+	const byChannel = new Map();
+	for (const r of rows) {
+		const ch = String(r.channel).toLowerCase();
+		const list = byChannel.get(ch) || [];
+		list.push({ firstSeen: Number(r.first_seen), lastSeen: Number(r.last_seen) });
+		byChannel.set(ch, list);
+	}
+	return byChannel;
 }
 
 /**
- * @param {Array<{id, channel, title, createdAt, length, source, status, frames, planKey, error, views?}>} rows
+ * @param {Array<{id, channel, title, createdAt, length, source, status, frames, planKey, error, views?, signs?}>} rows
  */
 export async function saveVods(rows) {
 	const now = Date.now();
@@ -106,14 +155,15 @@ export async function saveVods(rows) {
 		const values = rows.slice(i, i + 40).map(r => `(${[
 			str(r.id), str(r.channel), str((r.title || '').slice(0, 300)), num(r.createdAt), num(r.length), str(r.source || ''),
 			str(r.status), num(r.frames || 0), str(r.planKey ?? null), num(now), r.status === 'error' ? '1' : '0',
-			str(r.error ? String(r.error).slice(0, 300) : null), num(r.views),
+			str(r.error ? String(r.error).slice(0, 300) : null), num(r.views), num(r.signs),
 		].join(', ')})`);
-		await askRows(`INSERT INTO twitch_vods (vod_id, channel, title, created_at, length_s, source, status, frames, plan_key, scanned_at, tries, error, views)
+		await askRows(`INSERT INTO twitch_vods (vod_id, channel, title, created_at, length_s, source, status, frames, plan_key, scanned_at, tries, error, views, signs)
 			VALUES ${values.join(',\n')}
 			ON CONFLICT (vod_id) DO UPDATE SET
 				status = excluded.status, frames = excluded.frames, plan_key = excluded.plan_key,
 				scanned_at = excluded.scanned_at, error = excluded.error, title = excluded.title, length_s = excluded.length_s,
 				views = COALESCE(excluded.views, twitch_vods.views),
+				signs = COALESCE(excluded.signs, twitch_vods.signs),
 				tries = CASE WHEN excluded.status = 'error' THEN twitch_vods.tries + 1 ELSE twitch_vods.tries END`);
 	}
 }
@@ -165,10 +215,15 @@ export async function linkGames(video, packs) {
 		common ??= commonWords(await askRows(`SELECT channel, marks FROM pack_streams
 			WHERE marks IS NOT NULL AND played_at >= ${num(Date.now() - 61 * 864e5)}`));
 		for (const p of packs) {
-			const me = { channel: video.channel, played_at: video.createdAt + p.from * 1000, t_from: p.from, t_to: p.to, marks: p.marks };
+			const me = { vod_id: video.id, channel: video.channel, played_at: video.createdAt + p.from * 1000, t_from: p.from, t_to: p.to, marks: p.marks };
+			const yt = isYoutubeVod(video.id);
+			const timeFilter = yt
+				? `played_at BETWEEN ${num(me.played_at - YT_WINDOW_MS)} AND ${num(me.played_at + YT_WINDOW_MS)}`
+				: `(played_at BETWEEN ${num(me.played_at - 12 * 3600e3)} AND ${num(me.played_at + 12 * 3600e3)}`
+					+ ` OR (vod_id LIKE 'yt:%' AND played_at BETWEEN ${num(me.played_at - YT_WINDOW_MS)} AND ${num(me.played_at + YT_WINDOW_MS)}))`;
 			const near = await askRows(`SELECT vod_id, channel, played_at, t_from, t_to, marks, game FROM pack_streams
 				WHERE pack_key = ${str(p.key)} AND vod_id <> ${str(video.id)}
-					AND played_at BETWEEN ${num(me.played_at - 12 * 3600e3)} AND ${num(me.played_at + 12 * 3600e3)}`);
+					AND ${timeFilter}`);
 			const mates = near.filter(r => sameTable(me, r, common));
 			const ids = [`${video.id}:${p.key}`, ...mates.map(r => r.game || `${r.vod_id}:${p.key}`)];
 			const game = ids.sort()[0];
@@ -236,16 +291,16 @@ export async function notifyStreamOwners(video, keys) {
 	return sent;
 }
 
-/** Записи, которые полоса показывает живыми. */
+/** Записи Twitch, которые полоса показывает живыми (YouTube проверяется отдельно). */
 export async function aliveVods() {
-	const rows = await askRows('SELECT DISTINCT vod_id FROM pack_streams WHERE alive = 1');
+	const rows = await askRows("SELECT DISTINCT vod_id FROM pack_streams WHERE alive = 1 AND vod_id NOT LIKE 'yt:%'");
 	return rows.map(r => String(r.vod_id));
 }
 
 /**
- * Записи умерли: из полосы — вон, строка остаётся историей и статистикой
- * (решение 3 в twitch-streams.md). Живым — отметка, что проверены сегодня,
- * и свежие просмотры с Twitch.
+ * Записи умерли: удаляем их из pack_streams (хранить стримы с удалённой записью
+ * незачем), а в twitch_vods отмечаем 'gone', чтобы не пытаться сканировать снова.
+ * Живым — отметка, что проверены сегодня, и свежие просмотры с Twitch.
  *
  * @param {string[]} dead
  * @param {Array<[string, number]>} views
@@ -254,14 +309,15 @@ export async function markAlive(dead, views = []) {
 	const now = Date.now();
 	for (let i = 0; i < dead.length; i += 50) {
 		const ids = dead.slice(i, i + 50).map(str).join(', ');
-		await askRows(`UPDATE pack_streams SET alive = 0, checked_at = ${now} WHERE vod_id IN (${ids});
+		await askRows(`DELETE FROM pack_streams WHERE vod_id IN (${ids});
 			UPDATE twitch_vods SET status = 'gone' WHERE vod_id IN (${ids})`);
 	}
+	await askRows("DELETE FROM pack_streams WHERE alive = 0 AND vod_id NOT LIKE 'yt:%'");
 	for (let i = 0; i < views.length; i += 40) {
 		const part = views.slice(i, i + 40);
 		const cases = part.map(([id, count]) => `WHEN ${str(id)} THEN ${num(count)}`).join(' ');
 		const ids = part.map(([id]) => str(id)).join(', ');
 		await askRows(`UPDATE twitch_vods SET views = CASE vod_id ${cases} ELSE views END WHERE vod_id IN (${ids})`);
 	}
-	await askRows(`UPDATE pack_streams SET checked_at = ${now} WHERE alive = 1`);
+	await askRows(`UPDATE pack_streams SET checked_at = ${now} WHERE alive = 1 AND vod_id NOT LIKE 'yt:%'`);
 }

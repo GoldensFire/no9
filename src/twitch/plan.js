@@ -1,5 +1,8 @@
 // Где внутри записи искать SIGame и какие кадры снимать.
 //
+// Общий с Worker (cf/src/twitch-live.js тянет отсюда SIGAME_TITLE_RE и isSvoyakShow):
+// ничего Node-специфичного (node:fs и т. д.) сюда тащить нельзя.
+//
 // Из TwitchFinder (plan.md, 6.6, 0.6, 0.9) с одним упрощением: OCR на раннере
 // дешёвый (0,33 с на кадр, twitch-streams.md 3.6), поэтому внутри окон SIGame
 // сразу берётся шаг 2 мин, без грубой сетки и уточнения.
@@ -63,18 +66,23 @@ export function openings(shots) {
 export const isSigame = name => /^si\s*game$/i.test(String(name || '').trim());
 
 // Стримеры не всегда ставят категорию, а название обычно выдаёт игру
-export const SIGAME_TITLE_RE = /\bsi\s*-?\s*game|си\s*-?\s*г[еэ]йм|своя\s+игра|свою\s+игру|своей\s+игр|свояк|своячок/i;
+export const SIGAME_TITLE_RE = /\bsi\s*-?\s*game|(?:си)?си\s*-?\s*(?:г[еэ]йм|гам[еа])|сиш(?:еч)?к[ауеиой]|[сc]воя[\s/._-]*игра|[сc]вою[\s/._-]*игру|(?:по|в)\s+[сc]воей\s+игр|[сc]воя\s+большая\s+игра|[сc]вояк(?:а|у|ом|е|и)?|[сc]вояч[ое]?к/i;
 
-// Просмотры YouTube-шоу «Свояк» и инди-разработка («делаю свою игру»):
+// Просмотры YouTube-шоу «Свояк», инди-разработка («делаю свою игру»),
+// испанский спам по «sigame» и кастомные лобби других игр:
 // не тратить кадры probe, если категория не SIGame
-export const SVOYAK_SHOW_RE = /(?<![а-яё])(?:смотрим|смотрю|реакт|реакция|разбор)(?![а-яё]).*свояк|(?<![а-яё])свояк(?![а-яё]).*(?<![а-яё])(?:коваль|сатир|малащенко|шоу)(?![а-яё])/i;
-const GAMEDEV_TITLE_RE = /(?<![а-яё])(?:дела[юе]|созда[юё]|разрабатыва[юе]|пиш[уе]|выпустил|выпуска[юе])\S*\s+свою\s+игру/i;
-const STRICT_SIGAME_RE = /\bsi\s*-?\s*game|си\s*-?\s*г[еэ]йм|свояк|своячок/i;
+export const SVOYAK_SHOW_RE = /(?<![а-яё])(?:смотрим|смотрю|смотр[иеэ]м|реакт|реакция|разбор)(?![а-яё]).*свояк|(?<![а-яё])свояк(?![а-яё]).*(?:смотр[иеэю]|реакт|ковал[ьяею]|сатир|малащенко|шоу)/i;
+const GAMEDEV_TITLE_RE = /(?<![а-яё])(?:с?дела[юел]\S*|созда[юёл]\S*|разрабатыва\S*|пиш[уе]\S*|выпусти\S*|выпуска\S*|тестиру\S*|показыва\S*|делаем)\s+свою\s+игру|свою\s+игру.*(?:steam|стим|roblox|роблокс|геймджем|game\s*jam)/i;
+const SPANISH_SIGAME_RE = /\bsigame\s+(?:en|a|por|titok|tiktok)\b|\b(?:porfa|hola|gente)\b.*\bsigame\b/i;
+const CUSTOM_LOBBY_RE = /\b(?:5\s*[/xхвv]\s*5|ability\s+draft|renodx|dlss)\b/i;
+const STRICT_SIGAME_NAME_RE = /\bsi\s*-?\s*game|(?:си)?си\s*-?\s*(?:г[еэ]йм|гам[еа])|сиш(?:еч)?к[ауеиой]/i;
+const STRICT_SIGAME_RE = /\bsi\s*-?\s*game|(?:си)?си\s*-?\s*(?:г[еэ]йм|гам[еа])|сиш(?:еч)?к[ауеиой]|[сc]вояк(?:а|у|ом|е|и)?|[сc]вояч[ое]?к/i;
 
 export function isSvoyakShow(video) {
 	if (isSigame(video?.game)) return false;
 	const title = video?.title || '';
-	if (SVOYAK_SHOW_RE.test(title) || GAMEDEV_TITLE_RE.test(title)) return true;
+	if (SVOYAK_SHOW_RE.test(title) || GAMEDEV_TITLE_RE.test(title) || SPANISH_SIGAME_RE.test(title)) return true;
+	if (CUSTOM_LOBBY_RE.test(title) && !STRICT_SIGAME_NAME_RE.test(title)) return true;
 	if (/^software and game development$/i.test(String(video?.game || '').trim()) && !STRICT_SIGAME_RE.test(title)) return true;
 	return false;
 }
@@ -97,13 +105,20 @@ export function merge(ranges) {
  */
 export function windowsOf(video) {
 	const len = video.length;
-	const sig = video.chapters.filter(c => isSigame(c.game));
+	const chapters = video.chapters || [];
+	const sig = chapters.filter(c => isSigame(c.game));
 	if (sig.length) {
 		return { mode: 'chapters', windows: merge(sig.map(c => [Math.max(0, c.from - PAD), Math.min(len, c.from + c.len + PAD)])) };
 	}
+	if (video.liveWindows?.length) {
+		const live = merge(video.liveWindows.map(([a, b]) => [Math.max(0, a), Math.min(len, b)]));
+		if (live.length) return { mode: 'chapters', windows: live };
+	}
 	const titled = SIGAME_TITLE_RE.test(video.title) && !isSvoyakShow(video);
-	if (video.chapters.length) {
-		return titled ? { mode: 'probe', windows: [[0, len]] } : { mode: null, reason: 'главы есть, SIGame среди них нет' };
+	if (chapters.length) {
+		return (titled || isSigame(video.game))
+			? { mode: 'probe', windows: [[0, len]] }
+			: { mode: null, reason: 'главы есть, SIGame среди них нет' };
 	}
 	if (isSigame(video.game)) return { mode: 'whole', windows: [[0, len]] };
 	if (titled) return { mode: 'probe', windows: [[0, len]] };

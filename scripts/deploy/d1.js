@@ -194,15 +194,24 @@ export async function askRows(sql) {
 	}
 
 	const account = await accountId();
-
-	const response = await fetch(`${CLOUDFLARE_API}/accounts/${account}/d1/database/${databaseId()}/query`, {
+	const url = `${CLOUDFLARE_API}/accounts/${account}/d1/database/${databaseId()}/query`;
+	const init = {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${CLOUDFLARE_ENV.CLOUDFLARE_API_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify({ sql }),
-	});
+	};
+
+	// После долгой сборки статики (80+ с) keep-alive сокет к Cloudflare уже закрыт,
+	// и первый fetch в undici может упасть с UND_ERR_SOCKET — один повтор снимает это.
+	let response;
+	try {
+		response = await fetch(url, init);
+	} catch {
+		response = await fetch(url, init);
+	}
 
 	const body = await response.json().catch(() => null);
 

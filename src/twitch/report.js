@@ -20,12 +20,16 @@ export function markdown({ alive, discovery, results, index, took }) {
 	if (index) out.push(`Словарь: ${index.packs.size} паков, ${index.themes.length} тем, из них опознающих ${index.themes.filter(t => t.distinctive).length} (${index.ms} мс).`, '');
 	if (discovery) {
 		const { stats, skipped, todo } = discovery;
-		const extra = [
+		const parts = [
+			`категория ${stats.category} записей`,
+			stats.sullyReason ? `SullyGnome ${stats.sully} каналов (${stats.sullyReason})` : 'SullyGnome пропущен (фоллбэк)',
 			stats.live ? `live ${stats.live} каналов` : '',
 			stats.search ? `поиск ${stats.search} записей` : '',
+			stats.clips ? `клипы ${stats.clips} каналов` : '',
+			stats.mentions ? `@упоминания ${stats.mentions}` : '',
 		].filter(Boolean).join(', ');
 		const capNote = skipped.probeCap ? `, отложено probe ${skipped.probeCap}` : '';
-		out.push(`Поиск: категория ${stats.category} записей, SullyGnome ${stats.sully} каналов${extra ? `, ${extra}` : ''}, всего каналов ${stats.channels} → ${stats.videos} записей.`
+		out.push(`Поиск: ${parts}, всего каналов ${stats.channels} → ${stats.videos} записей.`
 			+ ` К просмотру ${todo.length}; пропущено: уже смотрели ${skipped.seen}, не SIGame ${skipped.notSigame}, старше горизонта ${skipped.old},`
 			+ ` пишется ${skipped.recording}, для подписчиков ${skipped.subonly}, удалены ${skipped.gone}, не дались ${skipped.failed}${capNote}.`, '');
 		for (const e of stats.errors) out.push(`- ❌ ${cell(e)}`);

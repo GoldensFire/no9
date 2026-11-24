@@ -92,11 +92,13 @@ const ADS_FRAMES = 'https://yandexadexchange.net https://*.yandexadexchange.net'
 const INSIGHTS_BEACON = 'https://cloudflareinsights.com';
 
 /**
- * Плеер Twitch: записи стримов смотрят прямо на сайте, рамкой
- * player.twitch.tv (см. web/twitch-player.js). Что внутри рамки — дело
- * Twitch: её собственные скрипты и картинки правило страницы не касается.
+ * Плееры Twitch и YouTube: записи стримов и видео смотрят прямо на сайте,
+ * рамкой player.twitch.tv или youtube-nocookie.com (см. web/twitch-player.js).
+ * Что внутри рамки — дело площадки: её собственные скрипты и картинки правило
+ * страницы не касается.
  */
 const TWITCH_PLAYER = 'https://player.twitch.tv';
+const YOUTUBE_PLAYER = 'https://www.youtube-nocookie.com https://www.youtube.com';
 
 /**
  * Откуда берутся значки людей. У Discord адрес складывается из номера учётной
@@ -151,7 +153,7 @@ const CSP = [
 	`style-src 'self' 'unsafe-inline' https://yastatic.net https://*.adfox.ru`,
 	`img-src 'self' data: blob: ${AVATARS} ${METRIKA} ${ADS}`,
 	`connect-src 'self' blob: ${METRIKA} ${METRIKA_WS} ${METRIKA_COM} ${INSIGHTS_BEACON} ${ADS}`,
-	`frame-src ${METRIKA} ${ADS} ${ADS_FRAMES} ${TWITCH_PLAYER}`,
+	`frame-src ${METRIKA} ${ADS} ${ADS_FRAMES} ${TWITCH_PLAYER} ${YOUTUBE_PLAYER}`,
 	`media-src 'self' blob: data: ${ADS}`,
 	// Объявление приходит со своим шрифтом с yastatic.net. Отдельной строкой
 	// потому, что своих шрифтов у сайта нет вовсе и до сих пор про них молчал

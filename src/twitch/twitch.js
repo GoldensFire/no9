@@ -13,7 +13,18 @@ export const HEADERS = { 'User-Agent': UA };
 
 const CHAPTERS = `moments(momentRequestType: VIDEO_CHAPTER_MARKERS){ edges{ node{ positionMilliseconds durationMilliseconds
   details{ ... on GameChangeMomentDetails{ game{ name } } } } } }`;
-const VIDEO = `id title lengthSeconds createdAt status viewCount game{ name } owner{ login displayName } ${CHAPTERS}`;
+const VIDEO = `id title lengthSeconds createdAt status viewCount broadcastType game{ name } owner{ login displayName } ${CHAPTERS}`;
+
+/** Минимальная длина HIGHLIGHT и UPLOAD (10 мин): отсекает минутные нарезки. */
+export const MIN_NON_ARCHIVE_S = 600;
+const ALLOWED_TYPES = new Set(['ARCHIVE', 'HIGHLIGHT', 'UPLOAD']);
+
+function isAcceptedVideo(v) {
+	if (!v) return false;
+	if (!ALLOWED_TYPES.has(v.type)) return false;
+	if (v.type !== 'ARCHIVE' && v.length < MIN_NON_ARCHIVE_S) return false;
+	return true;
+}
 
 async function post(body, tries = 3) {
 	for (let i = 1; ; i++) {
@@ -40,15 +51,67 @@ export async function gql(query, variables = {}) {
 	return j.data;
 }
 
-/** Пачка запросов одним POST — по 30, больше GQL не принимает. */
+/**
+ * Пачка запросов одним POST — по 30, больше GQL не принимает.
+ * Если внутри пачки отдельные элементы вернули errors (таймаут бэкенда Twitch),
+ * они логируются и повторяются меньшими пачками (по 5, затем по 1).
+ */
 export async function gqlBatch(items) {
-	const out = [];
-	for (let i = 0; i < items.length; i += 30) {
-		if (i > 0) await new Promise(res => setTimeout(res, 250));
-		const part = items.slice(i, i + 30);
-		const res = await post(part);
-		if (!Array.isArray(res)) throw new Error(`GQL: на пачку пришёл не массив: ${JSON.stringify(res).slice(0, 200)}`);
-		out.push(...res.map(r => r.data ?? null));
+	const out = new Array(items.length).fill(null);
+
+	const runChunks = async (indices, chunkSize) => {
+		const failed = [];
+		for (let i = 0; i < indices.length; i += chunkSize) {
+			if (i > 0) await new Promise(res => setTimeout(res, 250));
+			const idxPart = indices.slice(i, i + chunkSize);
+			const part = idxPart.map(idx => items[idx]);
+			let res;
+			try {
+				res = await post(part);
+			} catch (e) {
+				if (chunkSize > 1) {
+					failed.push(...idxPart);
+					continue;
+				}
+				console.warn(`GQL batch item failed: ${e.message}`);
+				continue;
+			}
+			if (!Array.isArray(res) || res.length !== idxPart.length) {
+				if (chunkSize > 1) {
+					failed.push(...idxPart);
+					continue;
+				}
+				console.warn(`GQL: на пачку пришёл не массив: ${JSON.stringify(res).slice(0, 200)}`);
+				continue;
+			}
+			for (let k = 0; k < idxPart.length; k++) {
+				const r = res[k];
+				if (!r || r.errors?.length || r.data === undefined) {
+					failed.push(idxPart[k]);
+					if (chunkSize === 1) {
+						const msg = r?.errors ? JSON.stringify(r.errors).slice(0, 200) : 'пустой ответ';
+						console.warn(`GQL item #${idxPart[k]} error after retries: ${msg}`);
+						out[idxPart[k]] = r?.data ?? null;
+					}
+				} else {
+					out[idxPart[k]] = r.data ?? null;
+				}
+			}
+		}
+		return failed;
+	};
+
+	const allIdx = items.map((_, i) => i);
+	let failed = await runChunks(allIdx, 30);
+	if (failed.length) {
+		console.warn(`GQL batch: ${failed.length} сбоев в пачках по 30 — повторяю по 5`);
+		await new Promise(res => setTimeout(res, 1000));
+		failed = await runChunks(failed, 5);
+	}
+	if (failed.length) {
+		console.warn(`GQL batch: ${failed.length} сбоев в пачках по 5 — повторяю по одному`);
+		await new Promise(res => setTimeout(res, 1500));
+		await runChunks(failed, 1);
 	}
 	return out;
 }
@@ -58,6 +121,7 @@ export function videoOf(node) {
 	if (!node) return null;
 	return {
 		id: String(node.id),
+		type: node.broadcastType || 'ARCHIVE',
 		title: node.title || '',
 		length: node.lengthSeconds || 0,
 		createdAt: Date.parse(node.createdAt),
@@ -74,30 +138,62 @@ export function videoOf(node) {
 	};
 }
 
-/** Записи категории SIGame — Twitch отдаёт около недели, одной страницей. */
+/** Записи категории SIGame (архивы, хайлайты и загрузки ≥ 10 мин). */
 export async function categoryVideos() {
 	const out = [];
 	let after = null;
 	for (let page = 0; page < 10; page++) {
-		const d = await gql(`query($a:Cursor){ game(name:"SIGame"){ videos(first:100, after:$a, sort:TIME, types:[ARCHIVE]){
+		const d = await gql(`query($a:Cursor){ game(name:"SIGame"){ videos(first:100, after:$a, sort:TIME, types:[ARCHIVE, HIGHLIGHT, UPLOAD]){
 		  edges{ cursor node{ ${VIDEO} } } pageInfo{ hasNextPage } } } }`, { a: after });
 		const v = d.game?.videos;
-		for (const e of v?.edges || []) out.push(videoOf(e.node));
+		for (const e of v?.edges || []) {
+			const item = videoOf(e.node);
+			if (isAcceptedVideo(item)) out.push(item);
+		}
 		if (!v?.pageInfo?.hasNextPage || !v.edges.length) break;
 		after = v.edges.at(-1).cursor;
 	}
 	return out;
 }
 
-/** Записи каналов: по сотне последних на канал, пачками. */
+/** Записи каналов: до 100 архивов + до 10 хайлайтов и загрузок ≥ 10 мин на канал, пачками. */
 export async function channelVideos(logins) {
 	const res = await gqlBatch(logins.map(l => ({
-		query: `query($l:String!){ user(login:$l){ login videos(first:100, type:ARCHIVE, sort:TIME){ edges{ node{ ${VIDEO} } } } } }`,
+		query: `query($l:String!){ user(login:$l){ login
+			videos(first:100, type:ARCHIVE, sort:TIME){ edges{ node{ ${VIDEO} } } }
+			highlights: videos(first:10, type:HIGHLIGHT, sort:TIME){ edges{ node{ ${VIDEO} } } }
+			uploads: videos(first:10, type:UPLOAD, sort:TIME){ edges{ node{ ${VIDEO} } } }
+		} }`,
 		variables: { l: l },
 	})));
 	const out = [];
-	for (const d of res) for (const e of d?.user?.videos?.edges || []) out.push(videoOf(e.node));
+	for (const d of res) {
+		const u = d?.user;
+		if (!u) continue;
+		for (const edges of [u.videos?.edges, u.highlights?.edges, u.uploads?.edges]) {
+			for (const e of edges || []) {
+				const item = videoOf(e.node);
+				if (isAcceptedVideo(item)) out.push(item);
+			}
+		}
+	}
 	return out;
+}
+
+/** Клипы категории SIGame за последнюю неделю: 1 GQL-запрос для добора пропущенных каналов и VOD. */
+export async function categoryClips(period = 'LAST_WEEK') {
+	const d = await gql(`query($p:ClipsPeriod!){ game(name:"SIGame"){ clips(first:100, criteria:{period:$p}){
+		edges{ node{ broadcaster{ login } video{ id } } }
+	} } }`, { p: period });
+	const channels = new Set();
+	const videoIds = new Set();
+	for (const e of d?.game?.clips?.edges || []) {
+		const login = e?.node?.broadcaster?.login;
+		if (login) channels.add(String(login).toLowerCase());
+		const vid = e?.node?.video?.id;
+		if (vid) videoIds.add(String(vid));
+	}
+	return { channels: [...channels], videoIds: [...videoIds] };
 }
 
 /** Записи по номерам. Удалённая — null на её месте. */
@@ -111,13 +207,17 @@ export async function videosById(ids) {
  * «si game» с пробелом нарочно не включён: Twitch ищет по отдельным словам
  * и тащит поток испаноязычных стримов (si + game).
  */
-export const SEARCH_QUERIES = ['sigame', 'сигейм', 'своя игра', 'свою игру', 'своячок', 'свояк'];
+export const SEARCH_QUERIES = [
+	'sigame', 'сигейм', 'си гейм', 'сигаме', 'си гаме', 'сишечка', 'сисигейм',
+	'своя игра', 'свояигра', 'свою игру', 'своячок', 'свояк', 'свояка', 'свояком',
+];
 
 /**
- * Поиск архивных VOD по ключевым словам в GQL searchFor.
+ * Поиск VOD (архивы, хайлайты и загрузки ≥ 10 мин) по ключевым словам в GQL searchFor.
  * Главы здесь не запрашиваются — их добирает discover.js через channelVideos()
  * или videosById(). Сортировка в searchFor по релевантности, а не строго по дате,
- * поэтому остановка идёт по maxPages, а старые записи отсеиваются по since.
+ * поэтому остановка идёт по maxPages, а старые ARCHIVE/UPLOAD отсеиваются по since
+ * (для вечных HIGHLIGHT порог since не применяется).
  */
 export async function searchVideos(queries = SEARCH_QUERIES, { maxPages = 5, since = 0 } = {}) {
 	const out = [];
@@ -144,10 +244,9 @@ export async function searchVideos(queries = SEARCH_QUERIES, { maxPages = 5, sin
 			const items = box?.items || [];
 			for (const node of items) {
 				if (!node) continue;
-				if (node.broadcastType && node.broadcastType !== 'ARCHIVE') continue;
 				const v = videoOf(node);
-				if (!v || seen.has(v.id)) continue;
-				if (since && v.createdAt < since) continue;
+				if (!isAcceptedVideo(v) || seen.has(v.id)) continue;
+				if (since && v.type !== 'HIGHLIGHT' && v.createdAt < since) continue;
 				if (!SIGAME_TITLE_RE.test(v.title) && !isSigame(v.game)) continue;
 				if (isSvoyakShow(v)) continue;
 				seen.add(v.id);

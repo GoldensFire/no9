@@ -38,6 +38,14 @@ export const COMMON_CHANNELS = 4;
 /** Запас на сдвиг: начало пака на записи известно с точностью до шага кадров. */
 export const OVERLAP_SLACK_S = 10 * 60;
 
+/** Окно сверки стола для YouTube: перезалив часто выходит через 1–14 дней после стрима. */
+export const YT_WINDOW_MS = 14 * 864e5;
+
+/** Это строка YouTube (vod_id вида «yt:<id>»)? */
+export const isYoutubeVod = id => String(id || '').startsWith('yt:');
+
+const isYoutubeChannelId = ch => /^UC[\w-]{20,}$/.test(String(ch || ''));
+
 // Слова интерфейса SIGame и чата, которые держатся у всех и ничего про стол
 // не говорят. Остальное такое отсекает частота по каналам (COMMON_CHANNELS).
 const STOP = new Set([
@@ -119,14 +127,20 @@ function loginSeen(login, words) {
  */
 export function sameTable(a, b, common) {
 	if (a.channel === b.channel) return false;
-	const aEnd = a.played_at + (a.t_to - a.t_from) * 1000;
-	const bEnd = b.played_at + (b.t_to - b.t_from) * 1000;
-	if (Math.min(aEnd, bEnd) + OVERLAP_SLACK_S * 1000 < Math.max(a.played_at, b.played_at)) return false;
+	const ytPair = isYoutubeVod(a.vod_id) || isYoutubeVod(b.vod_id);
+	if (ytPair) {
+		if (Math.abs(a.played_at - b.played_at) > YT_WINDOW_MS) return false;
+	} else {
+		const aEnd = a.played_at + (a.t_to - a.t_from) * 1000;
+		const bEnd = b.played_at + (b.t_to - b.t_from) * 1000;
+		if (Math.min(aEnd, bEnd) + OVERLAP_SLACK_S * 1000 < Math.max(a.played_at, b.played_at)) return false;
+	}
 
 	const wa = String(a.marks || '').split(' ').filter(Boolean);
 	const wb = String(b.marks || '').split(' ').filter(Boolean);
 	if (!wa.length && !wb.length) return false;
-	if (loginSeen(b.channel, wa) || loginSeen(a.channel, wb)) return true;
+	if ((!isYoutubeChannelId(b.channel) && loginSeen(b.channel, wa))
+		|| (!isYoutubeChannelId(a.channel) && loginSeen(a.channel, wb))) return true;
 
 	const set = new Set(wa.filter(w => !common.has(w)));
 	let shared = 0;

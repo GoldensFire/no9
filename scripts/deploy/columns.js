@@ -70,6 +70,9 @@ const COLUMNS = [
 	// Сколько просмотров у записи Twitch: приходит с GQL при обходе и сверке
 	// живости (src/twitch/twitch.js, src/twitch/store.js)
 	['twitch_vods', 'views', 'INTEGER'],
+	// Сколько кадров с признаками SIGame нашлось на записи: защищает knownChannels()
+	// от загрязнения ложными probe-каналами (src/twitch/store.js)
+	['twitch_vods', 'signs', 'INTEGER'],
 ];
 
 /**

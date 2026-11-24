@@ -700,7 +700,8 @@ CREATE TABLE IF NOT EXISTS twitch_vods (
 	scanned_at INTEGER,
 	tries INTEGER NOT NULL DEFAULT 0,
 	error TEXT,
-	views INTEGER
+	views INTEGER,
+	signs INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS ix_twitch_vods_created ON twitch_vods (created_at);
@@ -736,8 +737,8 @@ CREATE TABLE IF NOT EXISTS pack_streams (
 
 CREATE INDEX IF NOT EXISTS ix_pack_streams_pack ON pack_streams (pack_key, alive, played_at);
 
--- Каналы, замеченные в живой категории SIGame поллером Worker'а
--- (см. cf/src/twitch-live.js, расписание */20 * * * *). Ловит даже мелкие
+-- Каналы, замеченные в живой категории SIGame и RU Just Chatting (по заголовку/тегам)
+-- поллером Worker'а (см. cf/src/twitch-live.js, расписание */10 * * * *). Ловит даже мелкие
 -- каналы с 0–1 зрителем, которые SullyGnome отсекает, и тех, у кого SIGame
 -- шла не первой игрой стрима. Старые строки (старше 61 дня) чистит ночной cron.
 CREATE TABLE IF NOT EXISTS twitch_seen_channels (
@@ -746,6 +747,19 @@ CREATE TABLE IF NOT EXISTS twitch_seen_channels (
 );
 
 CREATE INDEX IF NOT EXISTS ix_twitch_seen_at ON twitch_seen_channels (seen_at);
+
+-- Окна живых стримов Just Chatting с заголовком или тегом SIGame: если стример
+-- позже сменил название стрима на другую игру, обход всё равно знает, в каком
+-- часу внутри VOD шла SIGame. Старые строки чистит ночной cron.
+CREATE TABLE IF NOT EXISTS twitch_seen_windows (
+	channel TEXT NOT NULL,
+	stream_id TEXT NOT NULL,
+	first_seen INTEGER NOT NULL,
+	last_seen INTEGER NOT NULL,
+	PRIMARY KEY (channel, stream_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_twitch_seen_windows_last ON twitch_seen_windows (last_seen);
 
 -- Служебный кэш поллера Twitch Helix: app access token (helix_token, с запасом
 -- по сроку) и идентификатор игры SIGame (sigame_game_id, бессрочно), чтобы
@@ -842,4 +856,85 @@ CREATE TABLE IF NOT EXISTS contest_scores (
 	score INTEGER CHECK (score BETWEEN 1 AND 10),
 	updated_at INTEGER NOT NULL,
 	PRIMARY KEY (entry_id, jury_id)
+);
+
+-- Отметки жюри для паков из библиотеки, попавших в конкурс по хештегам и словам
+-- (см. cf/src/library/contest-packs.js).
+CREATE TABLE IF NOT EXISTS contest_pack_scores (
+	contest_id TEXT NOT NULL,
+	package_id INTEGER NOT NULL,
+	jury_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	played INTEGER NOT NULL DEFAULT 0,
+	score INTEGER CHECK (score BETWEEN 1 AND 10),
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (contest_id, package_id, jury_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_contest_pack_scores_contest ON contest_pack_scores (contest_id);
+
+-- Паки, исключённые организатором из конкретного конкурса (например, хештег
+-- попал в описание случайно или работа не соответствует условиям).
+CREATE TABLE IF NOT EXISTS contest_excluded (
+	contest_id TEXT NOT NULL,
+	package_id INTEGER NOT NULL,
+	excluded_at INTEGER NOT NULL,
+	PRIMARY KEY (contest_id, package_id)
+);
+
+-- Заявки админа на точечный перескан пака выбранной моделью Gemini
+-- (см. cf/src/library/rescan.js и scripts/deploy/rescan.js).
+CREATE TABLE IF NOT EXISTS pack_rescans (
+	pack_id INTEGER PRIMARY KEY,
+	model TEXT NOT NULL,
+	requested_by INTEGER NOT NULL,
+	requested_at INTEGER NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	done_at INTEGER,
+	error TEXT
+);
+
+-- ————— записи «Своей игры» на YouTube —————
+--
+-- Рядом с twitch_vods: сканер YouTube (scripts/youtube.js, src/youtube/)
+-- смотрит ролики напрямую через Gemini Video API и складывает найденные паки
+-- в ту же таблицу pack_streams с префиксом vod_id = 'yt:' || video_id.
+--
+-- youtube_videos — какие ролики уже просмотрены (status: done | error | gone | restricted),
+-- сколько запросов и входных токенов ушло, сколько просмотров и можно ли
+-- встраивать видео рамкой (embeddable, age_restricted).
+CREATE TABLE IF NOT EXISTS youtube_videos (
+	video_id TEXT PRIMARY KEY,
+	channel_id TEXT NOT NULL,
+	channel_title TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	published_at INTEGER NOT NULL,
+	length_s INTEGER NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	calls INTEGER NOT NULL DEFAULT 0,
+	tokens_in INTEGER NOT NULL DEFAULT 0,
+	signs INTEGER,
+	plan_key TEXT,
+	scanned_at INTEGER,
+	tries INTEGER NOT NULL DEFAULT 0,
+	error TEXT,
+	views INTEGER,
+	embeddable INTEGER NOT NULL DEFAULT 1,
+	age_restricted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS ix_youtube_videos_pub ON youtube_videos (published_at);
+CREATE INDEX IF NOT EXISTS ix_youtube_videos_ch ON youtube_videos (channel_id);
+
+-- Известные YouTube-каналы с SIGame: найденные поиском, подтверждённые
+-- сканером и подтянутые из socialMedias Twitch-стримеров.
+CREATE TABLE IF NOT EXISTS youtube_channels (
+	channel_id TEXT PRIMARY KEY,
+	title TEXT NOT NULL DEFAULT '',
+	handle TEXT,
+	twitch_login TEXT,
+	source TEXT NOT NULL DEFAULT '',
+	sigame_videos INTEGER NOT NULL DEFAULT 0,
+	last_checked_at INTEGER,
+	added_at INTEGER NOT NULL
 );

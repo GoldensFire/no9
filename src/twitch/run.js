@@ -12,7 +12,7 @@ import { ocrPool, ocrWorkers } from './ocr.js';
 import { windowsOf } from './plan.js';
 import { details, markdown, windowsText, writeSummary } from './report.js';
 import { scanVod } from './scan.js';
-import { aliveVods, ensureSchema, knownChannels, knownVods, linkGames, markAlive, notifyStreamOwners, savePackStreams, saveVods, seenChannels } from './store.js';
+import { aliveVods, ensureSchema, knownChannels, knownTitles, knownVods, linkGames, markAlive, notifyStreamOwners, savePackStreams, saveVods, seenChannels, seenWindows } from './store.js';
 import { checkVideos, videosById } from './twitch.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -46,6 +46,7 @@ export function options(argv = process.argv.slice(2)) {
 		discoverOnly: !!a.discover,
 		aliveOnly: !!a.alive,
 		sullyDays: a.days ? Number(a.days) : a.all ? 90 : 7,
+		forceSully: !!a.all || !!a.days,
 		rescan: !!a.rescan,
 		limit: a.limit ? Number(a.limit) : Infinity,
 		minutes: a.minutes ? Number(a.minutes) : 240,
@@ -62,7 +63,7 @@ export async function run(o = options()) {
 	const since = started - HORIZON_DAYS * 864e5;
 	const useD1 = !o.dry;
 
-	let known = new Map(), channels = [], live = [];
+	let known = new Map(), channels = [], titles = [], live = { channels: [], latestAt: 0 }, liveWindows = new Map();
 	let alive = null;
 	if (useD1) {
 		await ensureSchema();
@@ -71,9 +72,11 @@ export async function run(o = options()) {
 			writeSummary(markdown({ alive, results: [] }));
 			return;
 		}
-		known = await knownVods(since);
+		known = await knownVods();
 		channels = await knownChannels(since);
+		titles = await knownTitles(since);
 		live = await seenChannels(since);
+		liveWindows = await seenWindows(since);
 	}
 
 	// 1. Что смотреть
@@ -86,7 +89,18 @@ export async function run(o = options()) {
 		const videos = await videosById(o.vods);
 		items = videos.map((v, i) => v ? { video: v, source: 'вручную' } : { video: { id: o.vods[i], channel: '?', title: '', createdAt: 0, length: 0, chapters: [] }, gone: true });
 	} else {
-		discovery = await discover({ sullyDays: o.sullyDays, since, known, knownChannels: channels, seenChannels: live, rescan: o.rescan });
+		discovery = await discover({
+			sullyDays: o.sullyDays,
+			forceSully: o.forceSully,
+			since,
+			known,
+			knownChannels: channels,
+			knownTitles: titles,
+			seenChannels: live.channels,
+			seenLatestAt: live.latestAt,
+			seenWindows: liveWindows,
+			rescan: o.rescan,
+		});
 		items = discovery.todo;
 	}
 
@@ -126,7 +140,7 @@ export async function run(o = options()) {
 					const sent = await notifyStreamOwners(v, fresh);
 					if (sent) console.log(`  звонков авторам: ${sent}`);
 				}
-				await saveVods([{ ...v, source: item.source, status: res.status, frames: res.frames, planKey: res.planKey, error: res.error }]);
+				await saveVods([{ ...v, source: item.source, status: res.status, frames: res.frames, signs: res.signs, planKey: res.planKey, error: res.error }]);
 			}
 			if (o.saveOcr && cache) fs.writeFileSync(o.saveOcr, JSON.stringify(cache));
 		}

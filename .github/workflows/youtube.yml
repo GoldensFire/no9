@@ -1,0 +1,123 @@
+# Записи «Своей игры» на YouTube: каждый день в 15:15 по Ханою (08:15 UTC).
+#
+# Что происходит: ищутся свежие ролики SIGame (поиск + известные каналы +
+# раз в неделю мост socialMedias с Twitch-стримеров); раз в неделю проверяется
+# живость YouTube-записей в полосе; каждый новый ролик смотрится короткими
+# срезами через Gemini Video API напрямую по YouTube URL (без yt-dlp, ffmpeg
+# и tesseract), темы сверяются с библиотекой и вердикты пишутся в D1
+# (pack_streams с префиксом yt:, youtube_videos, youtube_channels).
+#
+# Устройство — scripts/youtube.js и src/youtube/; план — youtube-gemini-plan.md.
+#
+# Время запуска (08:15 UTC = 00:15 Pacific Time) выбрано сразу после сброса
+# суточных квот Gemini Free Tier и YouTube Data API v3, вне дневного пика США
+# и далеко от nightly.yml (20:50 UTC) и twitch.yml (06:00 UTC).
+
+name: Записи YouTube
+
+on:
+  schedule:
+    - cron: '15 8 * * *'
+
+  workflow_dispatch:
+    inputs:
+      videos:
+        description: 'ID или ссылки YouTube через запятую. Пусто — найти самим.'
+        required: false
+        default: ''
+      backfill:
+        description: 'Глубокий обход (больше страниц поиска, до 50 видео на канал, мост Twitch)'
+        type: boolean
+        default: false
+      days:
+        description: 'Горизонт поиска в днях. Пусто — 7 (при backfill — без порога).'
+        required: false
+        default: ''
+      limit:
+        description: 'Максимум видео за запуск. Пусто — 45.'
+        required: false
+        default: ''
+      rescan:
+        description: 'Смотреть заново и уже просмотренные'
+        type: boolean
+        default: false
+      dry:
+        description: 'Не читать и не писать D1'
+        type: boolean
+        default: false
+      minutes:
+        description: 'Сколько минут отпущено. Пусто — 120.'
+        required: false
+        default: ''
+
+concurrency:
+  group: youtube
+  cancel-in-progress: false
+
+jobs:
+  youtube:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Забрать базу с полки
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node --no-warnings scripts/state.js pull
+
+      - name: Смотреть YouTube
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          YOUTUBE_GEMINI_API_KEY: ${{ secrets.YOUTUBE_GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          VIDEOS: ${{ inputs.videos }}
+          BACKFILL: ${{ inputs.backfill }}
+          DAYS: ${{ inputs.days }}
+          LIMIT: ${{ inputs.limit }}
+          RESCAN: ${{ inputs.rescan }}
+          DRY: ${{ inputs.dry }}
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          minutes=$(printf '%s' "$MINUTES" | tr -cd '0-9')
+          args="--out=$RUNNER_TEMP/youtube.json --minutes=${minutes:-120}"
+          if [ -n "$VIDEOS" ]; then
+            clean_videos=$(printf '%s' "$VIDEOS" | tr -cd 'A-Za-z0-9_,-')
+            if [ -n "$clean_videos" ]; then args="$args --videos=$clean_videos"; fi
+          fi
+          if [ "$BACKFILL" = "true" ]; then args="$args --backfill"; fi
+          days=$(printf '%s' "$DAYS" | tr -cd '0-9')
+          if [ -n "$days" ]; then args="$args --days=$days"; fi
+          limit=$(printf '%s' "$LIMIT" | tr -cd '0-9')
+          if [ -n "$limit" ]; then args="$args --limit=$limit"; fi
+          if [ "$RESCAN" = "true" ]; then args="$args --rescan"; fi
+          if [ "$DRY" = "true" ]; then args="$args --dry"; fi
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] && [ "$DRY" != "true" ]; then
+            echo "::warning::Нет CLOUDFLARE_API_TOKEN — смотрю без D1"
+            args="$args --dry"
+          fi
+          node --no-warnings scripts/youtube.js $args
+
+      - name: Подробности
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: youtube
+          path: ${{ runner.temp }}/youtube.json
+          retention-days: 14
+          if-no-files-found: ignore

@@ -233,6 +233,20 @@ export const config = {
 	geminiModKey: readSecret('GEMINI_MOD_KEY', 'gemini-mod-key.txt'),
 
 	/**
+	 * Ключ Gemini для сканера YouTube-записей (src/youtube/gemini.js) — из
+	 * отдельного проекта Google, чтобы не делить RPD и TPM с ночной разметкой
+	 * паков. Если не задан, берётся основной geminiKey.
+	 */
+	youtubeGeminiKey: readSecret('YOUTUBE_GEMINI_API_KEY', 'youtube-gemini-key.txt'),
+
+	/**
+	 * Ключ YouTube Data API v3 для поиска роликов и обхода каналов
+	 * (src/youtube/api.js). Если не задан, сканер переходит на встроенный
+	 * безключевой запасной путь через YouTube InnerTube.
+	 */
+	youtubeApiKey: readSecret('YOUTUBE_API_KEY', 'youtube-api-key.txt'),
+
+	/**
 	 * Вход через Discord. Приложение заводится на https://discord.com/developers/applications,
 	 * там же в OAuth2 → Redirects прописывается адрес возврата (см. discordRedirectUri).
 	 * Идентификатор и секрет кладутся в data/discord-client-id.txt и data/discord-client-secret.txt
