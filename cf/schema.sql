@@ -592,12 +592,17 @@ CREATE INDEX IF NOT EXISTS ix_friends_back ON friends (friend_id);
 -- notify_comments, notify_streams — звенеть ли колокольчику о разговоре
 -- под своим паком и о своём паке на стриме Twitch (панель «Уведомления»
 -- в настройках профиля). По умолчанию звенит.
+--
+-- plagiarism_immunity — иммунитет паков хозяина сайта от плагиата: все его
+-- паки считаются истинно оригинальными (показывается и меняется только хозяину
+-- в настройках профиля, читается шагом plagiarism через scripts/deploy/immunity.js).
 CREATE TABLE IF NOT EXISTS user_settings (
 	user_id INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
 	private_lists INTEGER NOT NULL DEFAULT 0,
 	updated_at INTEGER NOT NULL,
 	notify_comments INTEGER NOT NULL DEFAULT 1,
-	notify_streams INTEGER NOT NULL DEFAULT 1
+	notify_streams INTEGER NOT NULL DEFAULT 1,
+	plagiarism_immunity INTEGER NOT NULL DEFAULT 1
 );
 
 

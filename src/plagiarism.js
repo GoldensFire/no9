@@ -451,6 +451,12 @@ export function contentSince(row) {
  * в базе обычным паком, просто донором ни для кого не становится.
  */
 function earlier(a, b) {
+	// Пак с иммунитетом считается истинно оригинальным и всегда старше любого
+	// обычного пака — независимо от даты перезаливки файла
+	if (a.immune !== b.immune) {
+		return a.immune;
+	}
+
 	if (a.ts === null) {
 		return false;
 	}
@@ -547,7 +553,7 @@ function samePerson(a, b) {
  * приговор, и ничего больше. Свёртка отпечатков здесь уже разложена и дальше
  * не держится.
  */
-function toEntry(row, vkToSteam = null) {
+function toEntry(row, vkToSteam = null, immuneIds = null) {
 	const { byPrint, themeSizes, weights } = decodePrints(row.prints, row.prints_version ?? 1);
 	const url = (row.vk_author_url ?? '').trim();
 	const steamCreators = new Set(
@@ -560,6 +566,7 @@ function toEntry(row, vkToSteam = null) {
 	return {
 		id: row.id,
 		name: row.name ?? '',
+		immune: Boolean(immuneIds?.has(row.id)),
 		// Не дата сообщения, а дата содержимого: файл под сообщением меняют,
 		// а сообщение датой не двигается (см. contentTs)
 		ts: contentTs(row),
@@ -629,11 +636,11 @@ const round = value => Math.round(value * 1000) / 1000;
  *        это «ничего не нашлось». Рядом — обратная сторона тех же находок:
  *        у кого что взяли и кто взял (taken)
  */
-export function reviewPlagiarism(rows, limits, { vkToSteam = null } = {}) {
+export function reviewPlagiarism(rows, limits, { vkToSteam = null, immuneIds = null } = {}) {
 	const entries = [];
 
 	for (const row of rows) {
-		entries.push(toEntry(row, vkToSteam));
+		entries.push(toEntry(row, vkToSteam, immuneIds));
 	}
 
 	// Кто где встречается. Ключ — отпечаток вопроса, значение — паки, в которых
@@ -670,7 +677,7 @@ export function reviewPlagiarism(rows, limits, { vkToSteam = null } = {}) {
 	// один раз здесь, а не ищем самого раннего на каждый вопрос каждого пака:
 	// дальше остаётся сравнение двух пар чисел
 	for (const list of holders.values()) {
-		list.sort((a, b) => (earlier(a, b) ? -1 : 1));
+		list.sort((a, b) => (earlier(a, b) ? -1 : earlier(b, a) ? 1 : 0));
 	}
 
 	const verdicts = new Map();
@@ -694,6 +701,12 @@ export function reviewPlagiarism(rows, limits, { vkToSteam = null } = {}) {
 			if (entry.questions.size === 0) {
 				stats.mute++;
 			}
+		}
+
+		// Иммунитет от плагиата: паки с этим признаком считаются истинно
+		// оригинальными и не получают метки плагиата ни при каких совпадениях
+		if (entry.immune) {
+			continue;
 		}
 
 		// Свои вопросы — всё, кроме общих мест
@@ -727,8 +740,9 @@ export function reviewPlagiarism(rows, limits, { vkToSteam = null } = {}) {
 			// Донор найден — а не сидит ли он в окне неизвестности этого пака,
 			// решает inTheDark. Остальных держателей на этот счёт спрашивать
 			// незачем: список отсортирован, и найденный — самый ранний
-			// из подходящих; если уж он попал в окно, то и все прочие в нём
-			found.push({ fp, donor, dark: inTheDark(donor, entry) });
+			// из подходящих; если уж он попал в окно, то и все прочие в нём.
+			// Донор с иммунитетом — истинный первоисточник, окно к нему не относится
+			found.push({ fp, donor, dark: !donor.immune && inTheDark(donor, entry) });
 		}
 
 		if (found.length === 0) {

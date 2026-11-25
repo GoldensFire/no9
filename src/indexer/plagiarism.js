@@ -7,6 +7,7 @@
 import { config } from '../config.js';
 import { db, jsonOrDefault } from '../db.js';
 import { reviewPlagiarism, PRINTS_VERSION } from '../plagiarism.js';
+import { pullPlagiarismImmunity } from '../../scripts/deploy/immunity.js';
 import { say } from './progress.js';
 import { queueNote, targetSql } from './queue.js';
 
@@ -168,7 +169,70 @@ function setTaken(theme, place) {
  * их много, приговоры по всей базе неполны, и знать об этом важнее, чем
  * получить красивое число отмеченных.
  */
-export function checkPlagiarism() {
+/**
+ * Номера паков, которым положен иммунитет от плагиата: все паки хозяина сайта
+ * по его подтверждённым страницам ВК, связанным аккаунтам Steam и назначенным
+ * подписям (см. scripts/deploy/immunity.js).
+ */
+function resolveImmunePackIds(immunity, vkToSteam) {
+	const ids = new Set();
+
+	if (!immunity?.enabled) {
+		return ids;
+	}
+
+	const vkIds = immunity.vkIds ?? [];
+	const authorKeys = immunity.authorKeys ?? [];
+
+	if (vkIds.length > 0) {
+		const places = vkIds.map(() => '?').join(', ');
+		const vkUrls = vkIds.map(id => `https://vk.com/id${id}`);
+
+		for (const row of db.prepare(`SELECT DISTINCT package_id AS id FROM pack_authors WHERE canon_account IN (${places})`).all(...vkIds)) {
+			ids.add(row.id);
+		}
+
+		for (const row of db.prepare(`SELECT id FROM packages WHERE status = 'ok' AND TRIM(vk_author_url) IN (${places})`).all(...vkUrls)) {
+			ids.add(row.id);
+		}
+
+		const steamCreators = new Set();
+
+		for (const url of vkUrls) {
+			for (const creatorId of vkToSteam.get(url) ?? []) {
+				steamCreators.add(creatorId);
+			}
+		}
+
+		if (steamCreators.size > 0) {
+			const creatorList = [...steamCreators];
+			const creatorPlaces = creatorList.map(() => '?').join(', ');
+
+			for (const row of db.prepare(`
+				SELECT DISTINCT target_package_id AS id FROM pack_steam
+				WHERE state = 'ok' AND creator_id IN (${creatorPlaces})
+			`).all(...creatorList)) {
+				ids.add(row.id);
+			}
+		}
+	}
+
+	if (authorKeys.length > 0) {
+		const places = authorKeys.map(() => '?').join(', ');
+
+		for (const row of db.prepare(`
+			SELECT DISTINCT package_id AS id FROM pack_authors
+			WHERE author_key IN (${places})
+				OR canon_key IN (SELECT canon_key FROM pack_authors WHERE author_key IN (${places}))
+		`).all(...authorKeys, ...authorKeys)) {
+			ids.add(row.id);
+		}
+	}
+
+	return ids;
+}
+
+export async function checkPlagiarism() {
 	const target = targetSql();
 
 	// Названные поимённо паки судятся одни, а вот раскладывается база всегда
@@ -239,6 +303,13 @@ export function checkPlagiarism() {
 		vkToSteam.set(vkUrl, set);
 	}
 
+	const immunity = await pullPlagiarismImmunity();
+	const immuneIds = resolveImmunePackIds(immunity, vkToSteam);
+
+	if (immuneIds.size > 0) {
+		say('plagiarism', `иммунитет от плагиата включён: истинно оригинальных паков ${immuneIds.size}`);
+	}
+
 	// Отпечатки подшиваются слева: пак, у которого их ещё нет, из счёта
 	// не выпадает — он просто приходит с пустой свёрткой и остаётся ни при чём.
 	// Заодно подтягиваются дата самого раннего живого Steam-дубля (для contentTs),
@@ -257,7 +328,7 @@ export function checkPlagiarism() {
 		WHERE p.status = 'ok' ORDER BY p.id
 	`).iterate();
 
-	const { verdicts, taken, stats } = reviewPlagiarism(rows, config, { vkToSteam });
+	const { verdicts, taken, stats } = reviewPlagiarism(rows, config, { vkToSteam, immuneIds });
 
 	// Кто числился вором вчера. Нужны затем, чтобы снять метку с того, кто её
 	// потерял: пак, у которого сменился разбор или у которого нашёлся ещё более

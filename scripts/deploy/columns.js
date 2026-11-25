@@ -62,6 +62,9 @@ const COLUMNS = [
 	// (панель «Уведомления» в настройках профиля, cf/src/library/preferences.js)
 	['user_settings', 'notify_comments', 'INTEGER NOT NULL DEFAULT 1'],
 	['user_settings', 'notify_streams', 'INTEGER NOT NULL DEFAULT 1'],
+	// Иммунитет паков хозяина сайта от плагиата: его паки считаются истинно
+	// оригинальными (cf/src/library/preferences.js, scripts/deploy/immunity.js)
+	['user_settings', 'plagiarism_immunity', 'INTEGER NOT NULL DEFAULT 1'],
 	// Что держалось на экране всю игру и метка игры: две записи одного пака —
 	// одна совместная трансляция или разные (src/twitch/marks.js). Заводит их
 	// и сам обход стримов (src/twitch/store.js), кто бы ни пришёл первым
