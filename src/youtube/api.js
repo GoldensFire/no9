@@ -200,10 +200,10 @@ function normalizePlayerVideo(id, data) {
  * Поиск видео по запросу. Возвращает массив ID (метаданные добираются пачкой в videosById).
  *
  * @param {string} query
- * @param {{ publishedAfter?: number, maxPages?: number, days?: number }} [opts]
+ * @param {{ publishedAfter?: number, maxPages?: number, days?: number, order?: 'date'|'relevance' }} [opts]
  * @returns {Promise<{ ids: string[], calls: number }>}
  */
-export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, days = 7 } = {}) {
+export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, days = 7, order = 'date' } = {}) {
 	if (config.youtubeApiKey) {
 		const ids = [];
 		let pageToken = null;
@@ -213,7 +213,7 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 				part: 'id',
 				type: 'video',
 				videoDuration: 'long',
-				order: 'date',
+				order: order === 'relevance' ? 'relevance' : 'date',
 				relevanceLanguage: 'ru',
 				maxResults: '50',
 				q: query,
@@ -233,13 +233,12 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 	}
 
 	// Безключевой запасной путь (InnerTube search):
-	// EgIIAw%3D%3D = за эту неделю, EgIIBA%3D%3D = за этот месяц, EgIYAg%3D%3D = длинные (> 20 мин).
-	// Когда days <= 7, берём «за эту неделю» (чтобы видеть и ролики 15–20 мин),
-	// а когда backfill / days > 30 — «длинные > 20 мин» с сортировкой по дате (CAISBBgC).
-	let sp = 'EgIYAg%3D%3D';
+	// EgIIAw%3D%3D = за эту неделю, EgIIBA%3D%3D = за этот месяц,
+	// EgIYAg%3D%3D = длинные (> 20 мин) по релевантности, CAISBBgC = длинные (> 20 мин) по дате.
+	let sp = order === 'relevance' ? 'EgIYAg%3D%3D' : 'CAISBBgC';
 	if (days > 0 && days <= 7) sp = 'EgIIAw%3D%3D';
 	else if (days > 7 && days <= 31) sp = 'EgIIBA%3D%3D';
-	else if (days > 31) sp = 'CAISBBgC';
+	else if (days > 31 && order !== 'relevance') sp = 'CAISBBgC';
 
 	const ids = [];
 	const seen = new Set();
@@ -367,7 +366,8 @@ function extractGridVideos(gridItems) {
 }
 
 /**
- * Последние загрузки канала (через UU-плейлист в Data API v3 или вкладки Видео+Трансляции в InnerTube).
+ * Последние загрузки канала (через UU-плейлист в Data API v3 с пагинацией
+ * или вкладки Видео+Трансляции в InnerTube с continuation).
  *
  * @param {string} channelId UC...
  * @param {{ maxResults?: number }} [opts]
@@ -378,41 +378,71 @@ export async function channelUploads(channelId, { maxResults = 25 } = {}) {
 
 	if (config.youtubeApiKey) {
 		const playlistId = `UU${channelId.slice(2)}`;
-		try {
-			const data = await dataGet('playlistItems', {
-				part: 'contentDetails',
-				playlistId,
-				maxResults: String(Math.min(50, maxResults)),
-			});
-			const ids = (data.items || [])
-				.map(it => it?.contentDetails?.videoId)
-				.filter(Boolean)
-				.map(String);
-			return { ids, calls: 1 };
-		} catch (e) {
-			if (e.status === 404) return { ids: [], calls: 1 };
-			throw e;
+		const ids = [];
+		const seen = new Set();
+		let pageToken = null;
+		let calls = 0;
+		const maxPages = Math.max(1, Math.ceil(maxResults / 50));
+		for (let page = 0; page < maxPages && ids.length < maxResults; page++) {
+			try {
+				const params = {
+					part: 'contentDetails',
+					playlistId,
+					maxResults: String(Math.min(50, maxResults - ids.length)),
+				};
+				if (pageToken) params.pageToken = pageToken;
+				const data = await dataGet('playlistItems', params);
+				calls++;
+				for (const it of data.items || []) {
+					const id = it?.contentDetails?.videoId;
+					if (id && !seen.has(id)) {
+						seen.add(id);
+						ids.push(String(id));
+					}
+				}
+				pageToken = data.nextPageToken || null;
+				if (!pageToken) break;
+			} catch (e) {
+				if (e.status === 404) return { ids, calls: calls + 1 };
+				if (ids.length) break;
+				throw e;
+			}
 		}
+		return { ids, calls };
 	}
 
 	// InnerTube: вкладка «Видео» (EgZ2aWRlb3PyBgQKAjoA) и вкладка «Трансляции» (EgdzdHJlYW1z8gYECgJ6AA==)
 	const seen = new Set();
 	const ids = [];
 	let calls = 0;
+	const maxTabPages = Math.max(1, Math.ceil(maxResults / 30));
 	for (const params of ['EgZ2aWRlb3PyBgQKAjoA', 'EgdzdHJlYW1z8gYECgJ6AA==']) {
-		try {
-			const data = await innertubePost('browse', { browseId: channelId, params });
-			calls++;
-			const tab = (data?.contents?.twoColumnBrowseResultsRenderer?.tabs || []).find(t => t.tabRenderer?.selected);
-			const grid = tab?.tabRenderer?.content?.richGridRenderer?.contents || [];
-			for (const id of extractGridVideos(grid)) {
-				if (!seen.has(id) && ids.length < maxResults) {
-					seen.add(id);
-					ids.push(id);
+		let continuation = null;
+		for (let page = 0; page < maxTabPages && ids.length < maxResults; page++) {
+			try {
+				const payload = continuation ? { continuation } : { browseId: channelId, params };
+				const data = await innertubePost('browse', payload);
+				calls++;
+				let grid = [];
+				if (continuation) {
+					grid = data?.onResponseReceivedActions?.[0]?.appendContinuationItemsAction?.continuationItems || [];
+				} else {
+					const tab = (data?.contents?.twoColumnBrowseResultsRenderer?.tabs || []).find(t => t.tabRenderer?.selected);
+					grid = tab?.tabRenderer?.content?.richGridRenderer?.contents || [];
 				}
+				for (const id of extractGridVideos(grid)) {
+					if (!seen.has(id) && ids.length < maxResults) {
+						seen.add(id);
+						ids.push(id);
+					}
+				}
+				const contItem = grid.find(it => it?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token);
+				continuation = contItem?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || null;
+				if (!continuation) break;
+			} catch {
+				// У канала может не быть вкладки «Трансляции» — не ошибка
+				break;
 			}
-		} catch {
-			// У канала может не быть вкладки «Трансляции» — не ошибка
 		}
 	}
 	return { ids, calls };

@@ -10,7 +10,7 @@
 
 import { isSvoyakShow, SIGAME_TITLE_RE } from '../twitch/plan.js';
 
-export const PLAN_VERSION = 'yt-v1';
+export const PLAN_VERSION = 'yt-v2';
 
 /** Минимальная длина ролика (15 мин): отсекает шортсы, нарезки, гайды и песню Sigame. */
 export const MIN_LENGTH_S = 900;
@@ -20,8 +20,12 @@ export const CLIP_LEN_S = 12;
 export const CLIP_FPS = 0.25;
 export const BATCH_SIZE = 2;
 
-// YouTube-специфичный шум: телешоу НТВ, STALKER «Народная Солянка», гайды по созданию паков.
+// YouTube-специфичный шум: телешоу НТВ, студийное «Шоу не своя игра», PUBG «только своя игра»,
+// STALKER «Народная Солянка», гайды по созданию паков.
 const NTV_TITLE_RE = /\bнтв\b|\bntv\b|\bвыпуск\s+от\b|\bэфир\s+от\b|своя\s+игра\s+от\s+\d|\bновый\s+выпуск\b|телепередача|кулешов|игровой\s+стол\s+нтв/i;
+const STUDIO_SHOW_RE = /шоу\s+не\s+своя\s+игра/i;
+const PUBG_SOLO_RE = /\bpubg(?:m|mobile\w*)?\b|пабг\s*мобайл/i;
+const STRICT_SIGAME_RE = /\bsi\s*-?\s*game|си\s*-?\s*г[еэ]йм|сигаме/i;
 const BLOCKED_CHANNEL_RE = /^(?:нтв|ntv|канал\s+коваля|своя\s+игра\s+нтв|своя\s+игра\s*[-—|]\s*нтв)$/i;
 const STALKER_RE = /народная\s+солянка|\bs\.?t\.?a\.?l\.?k\.?e\.?r\.?\b|сталкер.*солянк/i;
 const GUIDE_TITLE_RE = /как\s+(?:создать|сделать|написать|собрать|скачать)\s+(?:свой\s+)?пак|гайд.*(?:sigame|сигейм|си\s*гейм)|(?:sigame|сигейм|си\s*гейм).*гайд|how\s+to\s+(?:create|make).*sigame|siquester|siq\s*editor|туториал.*(?:sigame|пак)/i;
@@ -44,6 +48,8 @@ export function shouldSkipVideo(video, { requireTitleMatch = true } = {}) {
 
 	if (BLOCKED_CHANNEL_RE.test(ch)) return { skip: true, reason: 'стоп-канал (НТВ / шоу)' };
 	if (NTV_TITLE_RE.test(title)) return { skip: true, reason: 'телепередача НТВ' };
+	if (STUDIO_SHOW_RE.test(title)) return { skip: true, reason: 'студийное шоу' };
+	if (PUBG_SOLO_RE.test(title) && !STRICT_SIGAME_RE.test(title)) return { skip: true, reason: 'PUBG / не SIGame' };
 	if (STALKER_RE.test(title)) return { skip: true, reason: 'STALKER Солянка' };
 	if (GUIDE_TITLE_RE.test(title)) return { skip: true, reason: 'гайд / туториал' };
 	if (isSvoyakShow({ title, game: '' })) return { skip: true, reason: 'шоу / геймдев / спам' };
@@ -80,7 +86,8 @@ export function parseChapterTimestamps(description, duration) {
  *   15–55 мин   → 3 батча (6 окон)
  *   55–120 мин  → 4 батча (8 окон)
  *   120–210 мин → 5 батчей (10 окон)
- *   > 210 мин   → 6 батчей (12 окон)
+ *   210–300 мин → 6 батчей (12 окон)
+ *   > 300 мин   → 7 батчей (14 окон)
  *
  * Первые 4 точки всегда идут в порядке [~8%, ~45%, ~25%, ~75%], чтобы
  * батчи #0 и #1 накрывали весь ролик целиком и давали чистый ранний выход
@@ -98,7 +105,8 @@ export function planSlices(video) {
 	if (mins < 55) count = 6;
 	else if (mins < 120) count = 8;
 	else if (mins < 210) count = 10;
-	else count = 12;
+	else if (mins < 300) count = 12;
+	else count = 14;
 
 	// Доли таймлайна в порядке приоритета (сначала ~8% и ~45%, затем ~25% и ~75%, потом заполнение)
 	const presets = {
@@ -106,6 +114,7 @@ export function planSlices(video) {
 		8: [0.08, 0.45, 0.25, 0.75, 0.16, 0.58, 0.35, 0.88],
 		10: [0.08, 0.45, 0.25, 0.75, 0.16, 0.58, 0.35, 0.88, 0.66, 0.94],
 		12: [0.08, 0.45, 0.25, 0.75, 0.15, 0.55, 0.33, 0.85, 0.21, 0.65, 0.40, 0.93],
+		14: [0.08, 0.45, 0.25, 0.75, 0.15, 0.55, 0.33, 0.85, 0.21, 0.65, 0.40, 0.93, 0.50, 0.80],
 	};
 
 	const starts = (presets[count] || presets[8]).map(f => Math.min(maxStart, Math.max(10, Math.round(duration * f))));
@@ -122,6 +131,51 @@ export function planSlices(video) {
 	}
 
 	const clips = starts.map(start => ({
+		start,
+		end: Math.min(duration - 2, start + CLIP_LEN_S),
+		fps: CLIP_FPS,
+	}));
+
+	const batches = [];
+	for (let i = 0; i < clips.length; i += BATCH_SIZE) {
+		batches.push(clips.slice(i, i + BATCH_SIZE));
+	}
+	return batches;
+}
+
+/**
+ * Дополнительные срезы для уточнения near-кандидатов (2 опознающие темы)
+ * или разреженных участков видео, где основная сетка попала на экраны вопросов.
+ *
+ * @param {{ length: number }} video
+ * @param {number[]} anchors опорные точки (секунды)
+ * @param {Array<{ start: number }>} existingClips уже просмотренные срезы
+ * @param {{ maxClips?: number, offsets?: number[], minGap?: number }} [opts]
+ * @returns {Array<Array<{ start: number, end: number, fps: number }>>}
+ */
+export function planDrillDown(video, anchors, existingClips, {
+	maxClips = 4,
+	offsets = [-240, 240, -480, 480, -120, 120],
+	minGap = 60,
+} = {}) {
+	const duration = Math.max(CLIP_LEN_S + 10, Math.floor(video.length || 0));
+	const maxStart = Math.max(0, duration - CLIP_LEN_S - 5);
+	const used = existingClips.map(c => c.start);
+	const picked = [];
+
+	// Перебираем сдвиги слоями по всем опорным точкам, чтобы при 2 near-паках каждый получил по паре срезов
+	for (const off of offsets) {
+		for (const anchor of anchors) {
+			if (picked.length >= maxClips) break;
+			const t = Math.min(maxStart, Math.max(10, Math.round(anchor + off)));
+			if (used.some(u => Math.abs(u - t) < minGap)) continue;
+			used.push(t);
+			picked.push(t);
+		}
+		if (picked.length >= maxClips) break;
+	}
+
+	const clips = picked.map(start => ({
 		start,
 		end: Math.min(duration - 2, start + CLIP_LEN_S),
 		fps: CLIP_FPS,

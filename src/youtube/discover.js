@@ -9,7 +9,7 @@ import { MAX_TRIES } from '../twitch/store.js';
 import { apiMode, channelUploads, parseYoutubeChannelRef, resolveChannels, searchVideos, videosById } from './api.js';
 import { shouldSkipVideo } from './plan.js';
 
-/** 9 проверенных запросов из youtube-gemini-plan.md (3.2). */
+/** 11 проверенных запросов (9 базовых из youtube-gemini-plan.md + 2 высокоточных RU-запроса). */
 export const SEARCH_QUERIES = [
 	'sigame',
 	'сигейм',
@@ -20,13 +20,15 @@ export const SEARCH_QUERIES = [
 	'своя игра запись стрима',
 	'своя игра стрим',
 	'своя игра twitch',
+	'своя игра твич',
+	'своя игра солянка',
 ];
 
-/** Вытащить все http(s)-ссылки из свободного текста (описание канала или панели Twitch). */
+/** Вытащить все http(s)-ссылки и голые youtube.com/... из свободного текста (описание канала или панели Twitch). */
 function extractUrls(text) {
 	if (!text) return [];
-	return (String(text).match(/https?:\/\/[^\s<>"')\]]+/gi) || [])
-		.map(u => u.replace(/[.,;:!?]+$/, ''));
+	const matches = String(text).match(/(?:https?:\/\/|(?:www\.|m\.)?youtube\.com\/)[^\s<>"')\]]+/gi) || [];
+	return matches.map(u => u.replace(/[.,;:!?]+$/, ''));
 }
 
 /**
@@ -114,7 +116,8 @@ export async function discover({
 } = {}) {
 	const now = Date.now();
 	const publishedAfter = backfill || days <= 0 ? 0 : now - days * 864e5;
-	const maxPages = backfill ? 2 : 1;
+	const datePages = backfill ? 3 : 1;
+	const relevancePages = backfill ? 2 : 0;
 
 	const stats = {
 		mode: apiMode(),
@@ -135,20 +138,31 @@ export async function discover({
 		s.add(src);
 	};
 
-	// 1. Поиск по 9 запросам
+	// 1. Поиск по запросам: в обычном прогоне 1 стр. по дате (11 вызовов),
+	// в backfill — 3 стр. по дате + 2 стр. по релевантности (до 55 вызовов из 100/сут),
+	// чтобы доставать не только последние 2–3 недели, но и многолетний бэклог 2020–2026.
 	for (const q of SEARCH_QUERIES) {
 		try {
-			const { ids, calls } = await searchVideos(q, { publishedAfter, maxPages, days: backfill ? 0 : days });
+			const { ids, calls } = await searchVideos(q, { publishedAfter, maxPages: datePages, days: backfill ? 0 : days, order: 'date' });
 			stats.searchQueries++;
 			stats.searchCalls += calls;
 			stats.searchRaw += ids.length;
 			for (const id of ids) addSource(id, 'search');
+			if (relevancePages > 0) {
+				const rel = await searchVideos(q, { publishedAfter: 0, maxPages: relevancePages, days: 0, order: 'relevance' });
+				stats.searchCalls += rel.calls;
+				stats.searchRaw += rel.ids.length;
+				for (const id of rel.ids) addSource(id, 'search');
+			}
 		} catch (e) {
 			stats.errors.push(`поиск «${q}»: ${e.message}`);
 		}
 	}
 
 	// 2. Известные YouTube-каналы (приоритет тем, где уже были SIGame или пришли с Twitch)
+	const provenChannels = new Set(
+		channels.filter(c => (c.sigame_videos || 0) > 0).map(c => String(c.channel_id))
+	);
 	const channelPool = [...channels]
 		.filter(c => (c.sigame_videos || 0) > 0 || c.source === 'twitch' || c.source === 'manual')
 		.sort((a, b) => (a.last_checked_at || 0) - (b.last_checked_at || 0))
@@ -157,7 +171,10 @@ export async function discover({
 	const checkedChannelIds = [];
 	for (const ch of channelPool) {
 		try {
-			const { ids } = await channelUploads(ch.channel_id, { maxResults: backfill ? 50 : 25 });
+			// В backfill листаем глубже (до 250 видео на подтверждённый SIGame-канал, 150 на Twitch-канал):
+			// playlistItems.list стоит 1 ед./50 видео из 10 000 ед./сут, а у каналов вроде Архива Графона и Denjil сотни записей.
+			const depth = backfill ? ((ch.sigame_videos || 0) > 0 ? 250 : 150) : 30;
+			const { ids } = await channelUploads(ch.channel_id, { maxResults: depth });
 			stats.channelsChecked++;
 			stats.channelRaw += ids.length;
 			checkedChannelIds.push(ch.channel_id);
@@ -218,8 +235,19 @@ export async function discover({
 		todo.push({ video: v, source: srcs.join('+') });
 	}
 
-	// Свежие впереди, чтобы при ограниченном --limit или --minutes сначала шли новые ролики
-	todo.sort((a, b) => (b.video.publishedAt || 0) - (a.video.publishedAt || 0));
+	// Очередь приоритета:
+	//   1) свежие ролики за последние 14 дней — всегда первыми (чтобы ежедневный поток не ждал бэклога);
+	//   2) в историческом бэклоге — сначала подтверждённые SIGame-каналы (высокая доля паков из базы),
+	//      затем каналы из моста Twitch, и только потом разовые находки поиска.
+	const freshCutoff = now - 14 * 864e5;
+	const priority = item => {
+		const pub = item.video.publishedAt || 0;
+		if (pub >= freshCutoff) return 3;
+		if (provenChannels.has(item.video.channelId)) return 2;
+		if (item.source.includes('channel')) return 1;
+		return 0;
+	};
+	todo.sort((a, b) => priority(b) - priority(a) || (b.video.publishedAt || 0) - (a.video.publishedAt || 0));
 
 	return { todo, stats, skipped, checkedChannelIds };
 }

@@ -26,10 +26,10 @@ const WEEK_MS = 7 * 864e5;
  *   --videos=id1,id2  эти ролики (URL или ID), а не найденные поиском
  *   --discover        только найти и показать кандидатов — без вызовов Gemini
  *   --alive           только проверить живость YouTube-записей в pack_streams
- *   --backfill        глубокий обход (больше страниц поиска и до 50 видео на канал)
+ *   --backfill        глубокий обход (по дате + релевантности, до 250 видео на канал, лимит 200)
  *   --sync-channels   принудительно прогнать мост Twitch socialMedias → youtube_channels
  *   --days=N          горизонт поиска в днях (по умолчанию 7)
- *   --limit=N         не больше N роликов за запуск (по умолчанию 40 в сутки)
+ *   --limit=N         не больше N роликов за запуск (по умолчанию 60; при --backfill — 200)
  *   --minutes=N       сколько минут отпущено (по умолчанию 120)
  *   --rescan          не пропускать уже просмотренные
  *   --dry             не читать и не писать D1
@@ -48,9 +48,9 @@ export function options(argv = process.argv.slice(2)) {
 		aliveOnly: !!a.alive,
 		backfill: !!a.backfill,
 		syncChannels: !!a['sync-channels'],
-		days: a.days ? Number(a.days) : (a.backfill ? 0 : 7),
-		limit: a.limit ? Number(a.limit) : (a.videos ? Infinity : 45),
-		minutes: a.minutes ? Number(a.minutes) : 120,
+		days: a.days !== undefined ? Number(a.days) : (a.backfill ? 0 : 7),
+		limit: a.limit !== undefined ? Number(a.limit) : (a.videos ? Infinity : (a.backfill ? 200 : 60)),
+		minutes: a.minutes !== undefined ? Number(a.minutes) : 120,
 		rescan: !!a.rescan,
 		dry: !!a.dry,
 		db: path.resolve(root, a.db ? String(a.db) : path.join('data', 'sibase.db')),

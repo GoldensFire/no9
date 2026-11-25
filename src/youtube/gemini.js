@@ -9,8 +9,9 @@
 //     это видео (VideoAccessError). Ключ считаем сломанным лишь после 5 разных
 //     видео подряд с 403.
 //   - 400 INVALID_ARGUMENT — битый срез или оффсет за концом видео (BadSliceError).
-//   - 503 UNAVAILABLE (пик Free Tier) — чередование моделей с нарастающей паузой
-//     5 с → 15 с → 30 с → 45 с и закрепление ответившей модели (gemini-3.5-flash-lite ↔ gemini-3.1-flash-lite).
+//   - 503 UNAVAILABLE (пик Free Tier) — переключение на запасную модель с
+//     короткой паузой 5 с → 15 с → 30 с → 45 с и 5-минутным охлаждением
+//     перегруженной модели (после охлаждения снова предпочитаем gemini-3.5-flash-lite).
 //   - 429 RESOURCE_EXHAUSTED — различаем минутный лимит (ждём RetryInfo до 30 с)
 //     и суточный (переключаем модель, а когда обе кончились — QuotaExhaustedError).
 
@@ -19,18 +20,29 @@ import { config } from '../config.js';
 export const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 const RPM_GAP_MS = 4500;
 const OVERLOAD_BACKOFF_MS = [5_000, 15_000, 30_000, 45_000];
+const OVERLOAD_COOLDOWN_MS = 5 * 60_000;
 const MAX_QUOTA_WAIT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 75_000;
 const MAX_CONSECUTIVE_403 = 5;
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
+function fmtOffset(sec) {
+	const s = Math.max(0, Math.round(sec || 0));
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const r = s % 60;
+	return h > 0
+		? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
+		: `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+}
+
 const PROMPT = [
-	'Посмотри на переданные фрагменты видео с YouTube. Это может быть запись игры в «Свою игру» (SIGame / SIOnline) или другое видео.',
+	'Проверь КАЖДЫЙ переданный фрагмент видео с YouTube отдельно. Это может быть запись игры в «Свою игру» (SIGame / SIOnline) или другое видео.',
 	'Определи:',
 	'1. is_sigame: true, если хотя бы в одном фрагменте виден интерфейс компьютерной игры SIGame / SIOnline (табло тем с ценами 100-500, заголовок «Тема, цена», экран вопроса или выбора тем с панелью игроков SIGame). Для телепередачи НТВ «Своя игра» (телестудия, ведущий, синее студийное табло) и любых других игр/разговоров ставь false.',
-	'2. themes: все названия тем SIGame, которые читаются на экране (со строк табло или из заголовка «Тема, цена»). Пиши ТОЛЬКО название темы, без цены и без лишних слов; в поле at укажи таймкод видео в формате MM:SS или HH:MM:SS, где тема видна.',
-	'3. pack_names: названия паков вопросов, если на экране виден экран начала игры / обложка / название пакета.',
+	'2. themes: ВСЕ названия тем SIGame, которые читаются на экране в КАЖДОМ фрагменте (со всех строк табло слева, из заголовка «Тема, цена» сверху, из списка тем раунда). Переписывай название темы дословно, без цены и без добавления лишних слов вроде «Вопросы из...»; в поле clip укажи номер фрагмента (1, 2, ...), а в at — таймкод видео в формате MM:SS или HH:MM:SS.',
+	'3. pack_names: названия паков вопросов ТОЛЬКО с экрана начала игры / обложки / названия пакета (отдельные темы раунда сюда НЕ клади).',
 	'4. players: ники игроков и ведущего, видимые на панели игроков SIGame.',
 	'Если SIGame в фрагментах нет, верни is_sigame: false и пустые массивы. Не выдумывай темы, которых не видно на экране.',
 ].join('\n');
@@ -47,6 +59,7 @@ const RESPONSE_SCHEMA = {
 				type: 'OBJECT',
 				properties: {
 					name: { type: 'STRING' },
+					clip: { type: 'INTEGER' },
 					at: { type: 'STRING' },
 				},
 				required: ['name'],
@@ -112,24 +125,28 @@ function quotaInfoFrom(error) {
 
 export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config.geminiKey, models = MODELS, log = () => {} } = {}) {
 	const nextSlotByModel = new Map();
+	const cooldownUntil = new Map();
 	const exhaustedModels = new Set();
-	let activeIdx = 0;
 	let consecutive403Videos = new Set();
 	let totalCalls = 0;
 	let totalTokensIn = 0;
 
 	const currentModel = () => {
-		for (let step = 0; step < models.length; step++) {
-			const idx = (activeIdx + step) % models.length;
-			if (!exhaustedModels.has(models[idx])) {
-				activeIdx = idx;
-				return models[idx];
-			}
-		}
-		return null;
+		const avail = models.filter(m => !exhaustedModels.has(m));
+		if (!avail.length) return null;
+		const now = Date.now();
+		// Предпочитаем основную модель (models[0] = gemini-3.5-flash-lite), как только остыл её 5-мин таймаут после 503
+		const ready = avail.find(m => (cooldownUntil.get(m) || 0) <= now);
+		if (ready) return ready;
+		return [...avail].sort((a, b) => (cooldownUntil.get(a) || 0) - (cooldownUntil.get(b) || 0))[0];
 	};
 
-	const fallbackModel = model => models.find(m => m !== model && !exhaustedModels.has(m)) || null;
+	const fallbackModel = model => {
+		const others = models.filter(m => m !== model && !exhaustedModels.has(m));
+		if (!others.length) return null;
+		const now = Date.now();
+		return others.find(m => (cooldownUntil.get(m) || 0) <= now) || others[0];
+	};
 
 	async function waitSlot(model) {
 		const now = Date.now();
@@ -146,21 +163,22 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 		totalCalls++;
 
 		const uri = `https://www.youtube.com/watch?v=${videoId}`;
+		const parts = [];
+		clips.forEach((c, idx) => {
+			parts.push({ text: `Фрагмент ${idx + 1} (таймкод видео ${fmtOffset(c.start)}–${fmtOffset(c.end)}):` });
+			parts.push({
+				fileData: { fileUri: uri },
+				videoMetadata: {
+					startOffset: `${c.start}s`,
+					endOffset: `${c.end}s`,
+					fps: c.fps ?? 0.25,
+				},
+			});
+		});
+		parts.push({ text: PROMPT });
+
 		const body = {
-			contents: [{
-				role: 'user',
-				parts: [
-					...clips.map(c => ({
-						fileData: { fileUri: uri },
-						videoMetadata: {
-							startOffset: `${c.start}s`,
-							endOffset: `${c.end}s`,
-							fps: c.fps ?? 0.25,
-						},
-					})),
-					{ text: PROMPT },
-				],
-			}],
+			contents: [{ role: 'user', parts }],
 			generationConfig: {
 				temperature: 0,
 				responseMimeType: 'application/json',
@@ -217,7 +235,11 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 			themes: Array.isArray(parsed.themes)
 				? parsed.themes
 					.filter(t => t && typeof t.name === 'string' && t.name.trim())
-					.map(t => ({ name: t.name.trim(), at: t.at ? String(t.at).trim() : '' }))
+					.map(t => ({
+						name: t.name.trim(),
+						clip: Number.isFinite(Number(t.clip)) && Number(t.clip) >= 1 ? Math.round(Number(t.clip)) : null,
+						at: t.at ? String(t.at).trim() : '',
+					}))
 				: [],
 		};
 	}
@@ -237,9 +259,7 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 		for (;;) {
 			try {
 				const res = await callOnce(model, videoId, clips);
-				// Закрепляем модель, которая реально ответила, чтобы следующий батч не возвращался в перегруженную
-				const okIdx = models.indexOf(model);
-				if (okIdx >= 0) activeIdx = okIdx;
+				cooldownUntil.delete(model);
 				return res;
 			} catch (err) {
 				const status = err.status || 0;
@@ -273,7 +293,6 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 						if (alt) {
 							log(`  [gemini] ${model} упёрлась в суточный 429 → переключаюсь на ${alt}`);
 							model = alt;
-							activeIdx = models.indexOf(alt);
 							rpmTry = 0;
 							continue;
 						}
@@ -287,10 +306,11 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 					continue;
 				}
 
-				// 503 / таймаут / сетевой сбой — чередуем модели и наращиваем паузу (5 → 15 → 30 → 45 с)
+				// 503 / таймаут / сетевой сбой — охлаждаем перегруженную модель на 5 мин и пробуем запасную
 				const isOverload = status === 503 || status === 500 || status === 502 || status === 504
 					|| /high demand|overloaded|UNAVAILABLE|timeout|aborted|fetch failed/i.test(err.message || '');
 				if (isOverload && overloadTry < OVERLOAD_BACKOFF_MS.length) {
+					cooldownUntil.set(model, Date.now() + OVERLOAD_COOLDOWN_MS);
 					const wait = OVERLOAD_BACKOFF_MS[overloadTry++];
 					const alt = fallbackModel(model);
 					if (alt) {

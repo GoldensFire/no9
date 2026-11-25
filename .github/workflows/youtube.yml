@@ -26,7 +26,7 @@ on:
         required: false
         default: ''
       backfill:
-        description: 'Глубокий обход (больше страниц поиска, до 50 видео на канал, мост Twitch)'
+        description: 'Глубокий обход (по дате + релевантности, до 250 видео на канал, лимит 200, мост Twitch)'
         type: boolean
         default: false
       days:
@@ -34,7 +34,7 @@ on:
         required: false
         default: ''
       limit:
-        description: 'Максимум видео за запуск. Пусто — 45.'
+        description: 'Максимум видео за запуск. Пусто — 60 (при backfill — 200).'
         required: false
         default: ''
       rescan:
