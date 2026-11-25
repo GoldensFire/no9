@@ -22,9 +22,18 @@ export const SEARCH_QUERIES = [
 	'своя игра twitch',
 ];
 
+/** Вытащить все http(s)-ссылки из свободного текста (описание канала или панели Twitch). */
+function extractUrls(text) {
+	if (!text) return [];
+	return (String(text).match(/https?:\/\/[^\s<>"')\]]+/gi) || [])
+		.map(u => u.replace(/[.,;:!?]+$/, ''));
+}
+
 /**
- * Мост Twitch → YouTube: вытащить ссылки на YouTube-каналы из socialMedias
- * подтверждённых SIGame-стримеров Twitch и отрезолвить новые в UC... ID.
+ * Мост Twitch → YouTube: вытащить ссылки на YouTube-каналы из socialMedias,
+ * панелей и описания подтверждённых SIGame-стримеров Twitch и отрезолвить новые в UC... ID.
+ * На облачных IP Twitch закрывает socialMedias ошибкой IntegrityCheckFailed,
+ * но панели и описание в том же GQL-ответе продолжают приходить.
  *
  * @param {string[]} twitchLogins
  * @param {Set<string>} knownChannelIds уже известные channel_id
@@ -32,34 +41,57 @@ export const SEARCH_QUERIES = [
  */
 export async function bridgeTwitchChannels(twitchLogins, knownChannelIds, knownLogins) {
 	const freshLogins = twitchLogins.filter(l => l && !knownLogins.has(l.toLowerCase()));
-	if (!freshLogins.length) return { channels: [], checked: 0 };
+	if (!freshLogins.length) return { channels: [], checked: 0, integrityBlocked: false };
 
 	const res = await gqlBatch(freshLogins.map(l => ({
-		query: 'query($l:String!){ user(login:$l){ login channel{ socialMedias{ name url } } } }',
+		query: `query($l:String!){
+			user(login:$l){
+				login
+				description
+				panels{ __typename ... on DefaultPanel { linkURL description } }
+				channel{ socialMedias{ name url } }
+			}
+		}`,
 		variables: { l },
 	})));
 
 	const refs = [];
 	const seenRef = new Set();
+	let usersWithChannel = 0;
+	let nullSocialMedias = 0;
+
+	const pushUrl = (rawUrl, login) => {
+		const parsed = parseYoutubeChannelRef(rawUrl);
+		if (!parsed) return;
+		if (parsed.kind === 'id' && knownChannelIds.has(parsed.value)) return;
+		const key = `${parsed.kind}:${parsed.value.toLowerCase()}`;
+		if (seenRef.has(key)) return;
+		seenRef.add(key);
+		refs.push({ ...parsed, twitchLogin: login });
+	};
+
 	for (const d of res) {
-		const login = d?.user?.login?.toLowerCase();
-		const socials = d?.user?.channel?.socialMedias || [];
-		if (!login || !socials.length) continue;
-		for (const s of socials) {
-			const parsed = parseYoutubeChannelRef(s?.url);
-			if (!parsed) continue;
-			if (parsed.kind === 'id' && knownChannelIds.has(parsed.value)) continue;
-			const key = `${parsed.kind}:${parsed.value.toLowerCase()}`;
-			if (seenRef.has(key)) continue;
-			seenRef.add(key);
-			refs.push({ ...parsed, twitchLogin: login });
+		const u = d?.user;
+		const login = u?.login?.toLowerCase();
+		if (!login) continue;
+		if (u.channel) {
+			usersWithChannel++;
+			if (u.channel.socialMedias === null) nullSocialMedias++;
 		}
+		for (const s of u.channel?.socialMedias || []) pushUrl(s?.url, login);
+		for (const p of u.panels || []) {
+			if (p?.linkURL) pushUrl(p.linkURL, login);
+			for (const url of extractUrls(p?.description)) pushUrl(url, login);
+		}
+		for (const url of extractUrls(u.description)) pushUrl(url, login);
 	}
 
+	const integrityBlocked = usersWithChannel > 0 && nullSocialMedias >= Math.ceil(usersWithChannel * 0.8);
 	const resolved = refs.length ? await resolveChannels(refs) : [];
 	return {
 		channels: resolved.filter(c => !knownChannelIds.has(c.channelId)),
 		checked: freshLogins.length,
+		integrityBlocked,
 	};
 }
 

@@ -19,9 +19,10 @@ export function markdown({ alive, bridge, discovery, results, index, took, stopp
 			: `Живость YouTube: проверено ${alive.checked} записей, удалено ${alive.dead}.`, '');
 	}
 	if (bridge) {
+		const note = bridge.integrityBlocked ? ' *(socialMedias закрыты Twitch Integrity с этого IP — использованы панели/описания)*' : '';
 		out.push(bridge.error
 			? `- ⚠️ мост Twitch → YouTube: ${cell(bridge.error)}`
-			: `Мост Twitch → YouTube: проверено ${bridge.checked} Twitch-каналов, найдено ${bridge.added} новых YouTube-каналов.`, '');
+			: `Мост Twitch → YouTube: проверено ${bridge.checked} Twitch-каналов, найдено ${bridge.added} новых YouTube-каналов.${note}`, '');
 	}
 	if (index) {
 		out.push(`Словарь: ${index.packs.size} паков, ${index.themes.length} тем (${index.ms} мс).`, '');

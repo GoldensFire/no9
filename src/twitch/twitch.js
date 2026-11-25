@@ -55,9 +55,15 @@ export async function gql(query, variables = {}) {
  * Пачка запросов одним POST — по 30, больше GQL не принимает.
  * Если внутри пачки отдельные элементы вернули errors (таймаут бэкенда Twitch),
  * они логируются и повторяются меньшими пачками (по 5, затем по 1).
+ * Отказы IntegrityCheckFailed не повторяются (с этого IP они детерминированы),
+ * а частичный ответ data при них сохраняется.
  */
 export async function gqlBatch(items) {
 	const out = new Array(items.length).fill(null);
+	let integrityErrors = 0;
+
+	const isIntegrityOnly = errors => Array.isArray(errors) && errors.length > 0
+		&& errors.every(e => e?.extensions?.code === 'IntegrityCheckFailed' || /failed integrity check/i.test(e?.message || ''));
 
 	const runChunks = async (indices, chunkSize) => {
 		const failed = [];
@@ -86,6 +92,11 @@ export async function gqlBatch(items) {
 			}
 			for (let k = 0; k < idxPart.length; k++) {
 				const r = res[k];
+				if (r && r.errors?.length && isIntegrityOnly(r.errors)) {
+					integrityErrors++;
+					out[idxPart[k]] = r.data ?? null;
+					continue;
+				}
 				if (!r || r.errors?.length || r.data === undefined) {
 					failed.push(idxPart[k]);
 					if (chunkSize === 1) {
@@ -103,6 +114,9 @@ export async function gqlBatch(items) {
 
 	const allIdx = items.map((_, i) => i);
 	let failed = await runChunks(allIdx, 30);
+	if (integrityErrors) {
+		console.warn(`GQL batch: ${integrityErrors} отказов IntegrityCheckFailed (часть полей закрыта Twitch с этого IP, повторы пропущены)`);
+	}
 	if (failed.length) {
 		console.warn(`GQL batch: ${failed.length} сбоев в пачках по 30 — повторяю по 5`);
 		await new Promise(res => setTimeout(res, 1000));

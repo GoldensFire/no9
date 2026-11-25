@@ -9,8 +9,8 @@
 //     это видео (VideoAccessError). Ключ считаем сломанным лишь после 5 разных
 //     видео подряд с 403.
 //   - 400 INVALID_ARGUMENT — битый срез или оффсет за концом видео (BadSliceError).
-//   - 503 UNAVAILABLE (пик Free Tier) — длинная лесенка пауз 15 с → 30 с → 60 с
-//     + переключение на запасную модель (gemini-3.5-flash-lite ↔ gemini-3.1-flash-lite).
+//   - 503 UNAVAILABLE (пик Free Tier) — чередование моделей с нарастающей паузой
+//     5 с → 15 с → 30 с → 45 с и закрепление ответившей модели (gemini-3.5-flash-lite ↔ gemini-3.1-flash-lite).
 //   - 429 RESOURCE_EXHAUSTED — различаем минутный лимит (ждём RetryInfo до 30 с)
 //     и суточный (переключаем модель, а когда обе кончились — QuotaExhaustedError).
 
@@ -18,7 +18,7 @@ import { config } from '../config.js';
 
 export const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
 const RPM_GAP_MS = 4500;
-const OVERLOAD_BACKOFF_MS = [15_000, 30_000, 60_000];
+const OVERLOAD_BACKOFF_MS = [5_000, 15_000, 30_000, 45_000];
 const MAX_QUOTA_WAIT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 75_000;
 const MAX_CONSECUTIVE_403 = 5;
@@ -233,11 +233,14 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 
 		let overloadTry = 0;
 		let rpmTry = 0;
-		let triedFallback = false;
 
 		for (;;) {
 			try {
-				return await callOnce(model, videoId, clips);
+				const res = await callOnce(model, videoId, clips);
+				// Закрепляем модель, которая реально ответила, чтобы следующий батч не возвращался в перегруженную
+				const okIdx = models.indexOf(model);
+				if (okIdx >= 0) activeIdx = okIdx;
+				return res;
 			} catch (err) {
 				const status = err.status || 0;
 
@@ -284,27 +287,20 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 					continue;
 				}
 
-				// 503 / таймаут / сетевой сбой — длинный backoff + запасная модель
+				// 503 / таймаут / сетевой сбой — чередуем модели и наращиваем паузу (5 → 15 → 30 → 45 с)
 				const isOverload = status === 503 || status === 500 || status === 502 || status === 504
 					|| /high demand|overloaded|UNAVAILABLE|timeout|aborted|fetch failed/i.test(err.message || '');
-				if (isOverload) {
-					if (overloadTry < OVERLOAD_BACKOFF_MS.length) {
-						const wait = OVERLOAD_BACKOFF_MS[overloadTry++];
-						// На второй ошибке пробуем запасную модель, если есть
-						if (!triedFallback && overloadTry >= 2) {
-							const alt = fallbackModel(model);
-							if (alt) {
-								log(`  [gemini] ${status || 'net'} на ${model}, пробую запасную ${alt} через ${wait / 1000} с`);
-								model = alt;
-								triedFallback = true;
-								await sleep(wait);
-								continue;
-							}
-						}
+				if (isOverload && overloadTry < OVERLOAD_BACKOFF_MS.length) {
+					const wait = OVERLOAD_BACKOFF_MS[overloadTry++];
+					const alt = fallbackModel(model);
+					if (alt) {
+						log(`  [gemini] ${status || 'net'} на ${model}, пробую ${alt} через ${wait / 1000} с (#${overloadTry})`);
+						model = alt;
+					} else {
 						log(`  [gemini] ${status || 'net'} на ${model}, повтор #${overloadTry} через ${wait / 1000} с`);
-						await sleep(wait);
-						continue;
 					}
+					await sleep(wait);
+					continue;
 				}
 
 				throw err;

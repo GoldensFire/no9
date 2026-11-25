@@ -160,8 +160,8 @@ export async function scanYoutubeVideo(video, ctx) {
 	const names = collectNames(frames);
 	const verdict = judge(hits, ctx.index, names);
 
-	// Контроль полноты скана: если > 50% батчей провалилось и пак не найден — повторим завтра
-	if (failed > batches.length / 2 && verdict.packs.length === 0) {
+	// Контроль полноты скана: если >= 50% батчей провалилось и пак не найден — повторим завтра
+	if (failed * 2 >= batches.length && verdict.packs.length === 0) {
 		return {
 			status: 'error',
 			calls,

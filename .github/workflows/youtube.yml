@@ -95,23 +95,22 @@ jobs:
           MINUTES: ${{ inputs.minutes }}
         run: |
           minutes=$(printf '%s' "$MINUTES" | tr -cd '0-9')
-          args="--out=$RUNNER_TEMP/youtube.json --minutes=${minutes:-120}"
+          args=(--out="$RUNNER_TEMP/youtube.json" --minutes="${minutes:-120}")
           if [ -n "$VIDEOS" ]; then
-            clean_videos=$(printf '%s' "$VIDEOS" | tr -cd 'A-Za-z0-9_,-')
-            if [ -n "$clean_videos" ]; then args="$args --videos=$clean_videos"; fi
+            args+=("--videos=$VIDEOS")
           fi
-          if [ "$BACKFILL" = "true" ]; then args="$args --backfill"; fi
+          if [ "$BACKFILL" = "true" ]; then args+=(--backfill); fi
           days=$(printf '%s' "$DAYS" | tr -cd '0-9')
-          if [ -n "$days" ]; then args="$args --days=$days"; fi
+          if [ -n "$days" ]; then args+=("--days=$days"); fi
           limit=$(printf '%s' "$LIMIT" | tr -cd '0-9')
-          if [ -n "$limit" ]; then args="$args --limit=$limit"; fi
-          if [ "$RESCAN" = "true" ]; then args="$args --rescan"; fi
-          if [ "$DRY" = "true" ]; then args="$args --dry"; fi
+          if [ -n "$limit" ]; then args+=("--limit=$limit"); fi
+          if [ "$RESCAN" = "true" ]; then args+=(--rescan); fi
+          if [ "$DRY" = "true" ]; then args+=(--dry); fi
           if [ -z "$CLOUDFLARE_API_TOKEN" ] && [ "$DRY" != "true" ]; then
             echo "::warning::Нет CLOUDFLARE_API_TOKEN — смотрю без D1"
-            args="$args --dry"
+            args+=(--dry)
           fi
-          node --no-warnings scripts/youtube.js $args
+          node --no-warnings scripts/youtube.js "${args[@]}"
 
       - name: Подробности
         if: always()

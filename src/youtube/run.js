@@ -223,12 +223,13 @@ async function syncTwitchBridge(existingChannels) {
 		const logins = await confirmedTwitchLogins();
 		const knownIds = new Set(existingChannels.map(c => String(c.channel_id)));
 		const knownLogins = new Set(existingChannels.map(c => String(c.twitch_login || '').toLowerCase()).filter(Boolean));
-		const { channels, checked } = await bridgeTwitchChannels(logins, knownIds, knownLogins);
+		const { channels, checked, integrityBlocked } = await bridgeTwitchChannels(logins, knownIds, knownLogins);
 		if (channels.length) {
 			await upsertYoutubeChannels(channels.map(c => ({ ...c, source: 'twitch', sigameDelta: 0 })));
 		}
-		console.log(`мост Twitch → YouTube: проверено ${checked} каналов, добавлено ${channels.length}`);
-		return { checked, added: channels.length };
+		const note = integrityBlocked ? ' (socialMedias закрыты Twitch Integrity с этого IP — взяты панели/описания)' : '';
+		console.log(`мост Twitch → YouTube: проверено ${checked} каналов, добавлено ${channels.length}${note}`);
+		return { checked, added: channels.length, integrityBlocked };
 	} catch (e) {
 		console.log(`мост Twitch → YouTube не сработал: ${e.message}`);
 		return { error: e.message };

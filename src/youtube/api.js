@@ -57,8 +57,8 @@ export function cleanVideoId(raw) {
 }
 
 /**
- * Достать ссылку на YouTube-канал из произвольного URL (из socialMedias Twitch).
- * @returns {{ kind: 'id'|'handle'|'url', value: string } | null}
+ * Достать ссылку на YouTube-канал из произвольного URL (из socialMedias/панелей Twitch).
+ * @returns {{ kind: 'id'|'handle'|'user'|'url', value: string } | null}
  */
 export function parseYoutubeChannelRef(rawUrl) {
 	const s = String(rawUrl || '').trim();
@@ -71,16 +71,19 @@ export function parseYoutubeChannelRef(rawUrl) {
 	} catch {
 		return null;
 	}
-	if (!/(?:^|\.)(?:youtube\.com|youtu\.be)$/i.test(url.hostname)) return null;
+	// youtu.be — всегда короткие ссылки на отдельные ролики, а не каналы
+	if (!/(?:^|\.)youtube\.com$/i.test(url.hostname)) return null;
 	const p = url.pathname.replace(/\/+$/, '');
 	const idMatch = /^\/channel\/(UC[\w-]{20,})(?:\/|$)/i.exec(p);
 	if (idMatch) return { kind: 'id', value: idMatch[1] };
 	const handleMatch = /^\/(@[^/?#]+)(?:\/|$)/.exec(p);
 	if (handleMatch) return { kind: 'handle', value: decodeURIComponent(handleMatch[1]) };
-	const customMatch = /^\/(?:c|user)\/([^/?#]+)(?:\/|$)/i.exec(p);
+	const userMatch = /^\/user\/([^/?#]+)(?:\/|$)/i.exec(p);
+	if (userMatch) return { kind: 'user', value: decodeURIComponent(userMatch[1]) };
+	const customMatch = /^\/c\/([^/?#]+)(?:\/|$)/i.exec(p);
 	if (customMatch) return { kind: 'url', value: `https://www.youtube.com${p}` };
 	const bareMatch = /^\/([a-zA-Z0-9._-]{3,})$/.exec(p);
-	if (bareMatch && !/^(?:watch|shorts|live|playlist|feed|results|channel|embed)$/i.test(bareMatch[1])) {
+	if (bareMatch && !/^(?:watch|shorts|live|playlist|feed|results|channel|embed|clip|post|redirect|attribution_link)$/i.test(bareMatch[1])) {
 		return { kind: 'url', value: `https://www.youtube.com/${bareMatch[1]}` };
 	}
 	return null;
@@ -151,15 +154,27 @@ function normalizeDataVideo(item) {
 	};
 }
 
+function isBotCheck(ps) {
+	if (ps?.status !== 'LOGIN_REQUIRED') return false;
+	const reason = `${ps.reason || ''} ${(ps.messages || []).join(' ')}`;
+	return /not a bot|confirm you.{0,5}re not|войдите.*подтверд|подтвердите.*не бот/i.test(reason)
+		|| (!ps.desktopLegacyAgeGateReason && !/age|возраст|18\+|inappropriate/i.test(reason));
+}
+
 function normalizePlayerVideo(id, data) {
 	const ps = data?.playabilityStatus || {};
 	const vd = data?.videoDetails || {};
 	const mf = data?.microformat?.playerMicroformatRenderer || {};
 	const length = Number(vd.lengthSeconds || mf.lengthSeconds || 0);
-	if (ps.status === 'ERROR' || (!length && !vd.title && !mf.title?.simpleText)) return null;
+	const botCheck = isBotCheck(ps);
+	if (ps.status === 'ERROR' || (!length && !vd.title && !mf.title?.simpleText)) {
+		return botCheck ? { botCheck: true } : null;
+	}
 	const liveDetails = mf.liveBroadcastDetails || null;
 	const isLive = Boolean(vd.isLive || liveDetails?.isLiveNow || (vd.isUpcoming) || (liveDetails?.startTimestamp && !liveDetails?.endTimestamp));
-	const ageRestricted = ps.status === 'LOGIN_REQUIRED' || mf.isFamilySafe === false;
+	const ageGate = Boolean(ps.desktopLegacyAgeGateReason)
+		|| (ps.status === 'LOGIN_REQUIRED' && !botCheck && /age|возраст|18\+|inappropriate/i.test(ps.reason || ''));
+	const ageRestricted = mf.isFamilySafe === false || ageGate;
 	const embeddable = ps.playableInEmbed === false ? false : (mf.embed ? Boolean(mf.embed.iframeUrl) : true);
 	const rawViews = vd.viewCount ?? mf.viewCount;
 	const views = rawViews != null && Number.isFinite(Number(rawViews)) ? Number(rawViews) : null;
@@ -308,8 +323,13 @@ export async function videosById(ids) {
 				const data = await innertubePost('player', { videoId: id });
 				calls++;
 				const v = normalizePlayerVideo(id, data);
-				if (v) videos.set(v.id, v);
-				else missing.push(id);
+				if (v?.botCheck) {
+					// Бот-проверка YouTube с датацентрового IP — не считаем видео удалённым
+				} else if (v) {
+					videos.set(v.id, v);
+				} else {
+					missing.push(id);
+				}
 			} catch {
 				// Сбой сети — не считаем видео удалённым
 			}
@@ -433,16 +453,32 @@ export async function resolveChannels(refs) {
 					title = item.snippet?.title || '';
 					handle = item.snippet?.customUrl || ref.value;
 				}
+			} else if (config.youtubeApiKey && ref.kind === 'user') {
+				const data = await dataGet('channels', { part: 'snippet', forUsername: ref.value });
+				const item = data.items?.[0];
+				if (item?.id) {
+					channelId = String(item.id);
+					title = item.snippet?.title || '';
+					handle = item.snippet?.customUrl || handle;
+				}
 			} else {
 				const url = ref.kind === 'handle'
 					? `https://www.youtube.com/${ref.value}`
-					: ref.value;
+					: (ref.kind === 'user' ? `https://www.youtube.com/user/${ref.value}` : ref.value);
 				const data = await innertubePost('navigation/resolve_url', { url });
 				const bid = data?.endpoint?.browseEndpoint?.browseId;
 				if (bid && /^UC[\w-]{20,}$/.test(bid)) {
 					channelId = bid;
 					const canonical = data?.endpoint?.browseEndpoint?.canonicalBaseUrl || '';
 					if (canonical.startsWith('/@')) handle = canonical.slice(1);
+					if (config.youtubeApiKey) {
+						const ch = await dataGet('channels', { part: 'snippet', id: channelId });
+						const item = ch.items?.[0];
+						if (item) {
+							title = item.snippet?.title || '';
+							handle = item.snippet?.customUrl || handle;
+						}
+					}
 				}
 			}
 
