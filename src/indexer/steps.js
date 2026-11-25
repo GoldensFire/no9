@@ -10,7 +10,7 @@
 // вместе с самими шагами — и второй вопрос упёрся бы в круг: шаг знает
 // про полосу, а полоса про шаг.
 
-import { has, targeted, text } from './options.js';
+import { has, steamIds, targeted, text } from './options.js';
 
 /**
  * Шаги и то, кто кому подносит работу.
@@ -25,7 +25,8 @@ import { has, targeted, text } from './options.js';
  */
 export const STEPS = [
 	{ key: 'vk', name: 'Обход обсуждений ВК', flag: '--vk-only', byDefault: true },
-	{ key: 'parse', name: 'Разбор паков', flag: '--parse-only', byDefault: true, feeds: ['vk'] },
+	{ key: 'steam', name: 'Обход Мастерской Steam', flag: '--steam', alias: '--steam-only', byDefault: false },
+	{ key: 'parse', name: 'Разбор паков', flag: '--parse-only', byDefault: true, feeds: ['vk', 'steam'] },
 	{ key: 'stats', name: 'Статистика и сложность', flag: '--stats-only', byDefault: true, feeds: ['parse'] },
 	// Тот же шаг, но только для паков, у которых статистики нет вовсе. Отдельным
 	// шагом, а не галочкой: его и полный обход выбирают в разных случаях, и по
@@ -87,18 +88,19 @@ export const STEPS = [
 	// Перед авторами и плагиатом точка входа подтверждает старые адреса ВК по
 	// отправителям сообщений (см. accounts.js). Поэтому ждут и самого обхода,
 	// даже когда разбор файлов в этом запуске не выбран.
-	{ key: 'authors', name: 'Один автор — один человек', flag: '--merge-authors', byDefault: true, after: ['vk', 'parse'] },
-	// Копии одного пака. Ждёт отпечатков по-настоящему: без них копию от соседа
-	// по серии не отличить, и пак с неснятыми отпечатками копией не станет
-	{ key: 'copies', name: 'Копии паков', flag: '--copies', byDefault: true, after: ['parse', 'prints'] },
-	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', byDefault: true, after: ['vk', 'parse', 'prints'] },
+	{ key: 'copies', name: 'Копии паков', flag: '--copies', byDefault: true, after: ['vk', 'steam', 'parse', 'prints'] },
+	{ key: 'authors', name: 'Один автор — один человек', flag: '--merge-authors', byDefault: true, after: ['vk', 'steam', 'parse', 'copies'] },
+	{ key: 'plagiarism', name: 'Плагиат', flag: '--plagiarism', byDefault: true, after: ['vk', 'steam', 'parse', 'prints', 'copies', 'authors'] },
 	{ key: 'recalc', name: 'Пересчёт уровней и ярлыков', flag: '--recalc', byDefault: false, after: ['stats', 'statsnew', 'topics', 'analyze'] },
 ];
 
 /** Какие шаги делать: по флагам, по списку --steps= или, если не сказано, обычный полный проход. */
 export function selectedSteps() {
 	const asked = new Set(text('steps').split(',').map(s => s.trim()).filter(Boolean));
-	const chosen = STEPS.filter(step => asked.has(step.key) || has(step.flag));
+	const chosen = STEPS.filter(step => asked.has(step.key)
+		|| has(step.flag)
+		|| (step.alias && has(step.alias))
+		|| (step.key === 'steam' && steamIds.length > 0));
 	let steps = chosen.length > 0 ? chosen : STEPS.filter(step => step.byDefault);
 
 	// Полный обход статистики спрашивает и про новых тоже: делать рядом с ним ещё
@@ -122,6 +124,11 @@ export function selectedSteps() {
 	if (targeted && steps.some(step => step.key === 'vk')) {
 		console.log('[ВК] обход обсуждений пропускаю: названы отдельные паки, а тему по ним не отобрать.');
 		steps = steps.filter(step => step.key !== 'vk');
+	}
+
+	if (targeted && steamIds.length === 0 && steps.some(step => step.key === 'steam')) {
+		console.log('[Steam] обход Мастерской пропускаю: названы отдельные паки, а каталог по ним не отобрать.');
+		steps = steps.filter(step => step.key !== 'steam');
 	}
 
 	return steps;

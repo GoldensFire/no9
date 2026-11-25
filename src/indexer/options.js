@@ -110,6 +110,18 @@ export const limit = value('limit', Infinity);
 export const tail = has('--tail');
 
 /**
+ * Ключи обхода Мастерской Steam (см. src/indexer/steam-scan.js):
+ * - `--steam-full` — обойти всю Мастерскую целиком, игнорируя хвост steam_tail_at;
+ * - `--steam-check` — дополнительно сверить живые steam_id на удаление/бан;
+ * - `--steam-ids=id1,id2` — точечно загрузить конкретные publishedfileid.
+ */
+export const steamFull = has('--steam-full');
+export const steamCheck = has('--steam-check');
+export const steamIds = text('steam-ids')
+	.split(/[^0-9]+/)
+	.filter(Boolean);
+
+/**
  * Сколько паков разбирать одновременно.
  *
  * Разбор пака — это не скачивание, а несколько коротких запросов вглубь архива:

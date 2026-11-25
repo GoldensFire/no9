@@ -12,18 +12,60 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import { db, authorsOrVk, buildMatchKey, saveAuthors } from '../db.js';
-import { openRemoteZip, DeadLinkError } from '../zip.js';
+import { db, authorsOrVk, buildMatchKey, jsonOrDefault, saveAuthors } from '../db.js';
+import { DeadLinkError } from '../zip.js';
+import { SteamGoneError } from '../steam/session.js';
 import { isObsceneName } from '../obscene.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { parseContentXml } from '../siq.js';
 import { ensurePreview, ensureThumb, hasPreview, isAvif } from '../thumbs.js';
 import { thumbName } from '../logo.js';
 import { force, jobs, refit, reparse, retryFailed } from './options.js';
-import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
+import { buryDeadLink, drain, isSteamPack, retryNetwork, withPackArchive } from './pipeline.js';
 import { say } from './progress.js';
 import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
-import { clearRecheck, storePrints, updateFailed, updateLogo, updateParsed } from './store.js';
+import {
+	clearRecheck, markPackSteamState, resetSteamTopics, storePrints, updateFailed,
+	updateFileName, updateJunk, updateLogo, updatePackSteamManifest, updateParsed,
+} from './store.js';
+
+function themeNamesOf(rounds) {
+	const names = new Set();
+
+	for (const round of rounds ?? []) {
+		for (const theme of round?.themes ?? []) {
+			const raw = typeof theme === 'string' ? theme : theme?.name;
+			const key = String(raw ?? '').trim().toLowerCase().replace(/ё/g, 'е');
+
+			if (key) {
+				names.add(key);
+			}
+		}
+	}
+
+	return names;
+}
+
+/** Доля изменившихся тем при переразборе обновлённого Steam-пака (раздел 5.4). */
+function themesChangedShare(oldRoundsJson, newRounds) {
+	const oldSet = themeNamesOf(jsonOrDefault(oldRoundsJson, []));
+	const newSet = themeNamesOf(newRounds);
+	const total = Math.max(oldSet.size, newSet.size);
+
+	if (total === 0) {
+		return 0;
+	}
+
+	let common = 0;
+
+	for (const name of oldSet) {
+		if (newSet.has(name)) {
+			common++;
+		}
+	}
+
+	return (total - common) / total;
+}
 
 const LOGO_EXTENSIONS = new Set(['.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.gif', '.webp', '.bmp', '.avif']);
 
@@ -183,7 +225,9 @@ export async function parsePackages() {
 	// Разбор идёт с самых свежих (см. NEWEST_FIRST в src/indexer/queue.js): очередь длинная, ночь конечная,
 	// и недоделанным должно остаться позавчерашнее, а не сегодняшнее
 	const pending = db.prepare(`
-		SELECT p.id, p.url, p.file_name, p.source_key, p.status, p.vk_author FROM packages p
+		SELECT p.id, p.url, p.file_name, p.source_key, p.status, p.vk_author,
+			p.recheck, p.rounds, p.topics_at
+		FROM packages p
 		WHERE (p.status IN (${placeholders}) OR p.recheck = 1)${target.where}
 		ORDER BY ${NEWEST_FIRST}
 	`);
@@ -195,6 +239,7 @@ export async function parsePackages() {
 	let ok = 0;
 	let failed = 0;
 	let dead = 0;
+	let junk = 0;
 	let logos = 0;
 	let unshown = 0;
 
@@ -204,10 +249,10 @@ export async function parsePackages() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			const label = bar.label();
+			const display = row.file_name || row.url || row.source_key;
 
 			try {
-				const result = await retryNetwork(() => withFreshUrl(row, async url => {
-					const archive = await openRemoteZip(url);
+				const result = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 
 					if (!entry) {
@@ -224,17 +269,45 @@ export async function parsePackages() {
 						throw new Error('в паке не указано имя');
 					}
 
-					const logo = await fetchLogo(archive, parsed.logo, row.id)
-						.catch(() => ({ file: null, state: 'error', shown: false }));
+					// Для Мастерской Steam отсеиваем пустышки и тесты (< 15 вопросов,
+					// решение 10.3 steam-workshop.md) ещё до скачивания обложки
+					const tooSmall = isSteamPack(row) && parsed.questionCount < config.steamMinQuestions;
+
+					const logo = tooSmall
+						? { file: null, state: 'none', shown: false }
+						: await fetchLogo(archive, parsed.logo, row.id)
+							.catch(() => ({ file: null, state: 'error', shown: false }));
 
 					// Следы SI-HYX — по именам файлов в оглавлении, оно уже на руках
 					// (см. src/hyx.js)
-					const hyx = hyxFiles(archive.entries.map(item => item.name), parsed.authors);
+					const hyx = tooSmall
+						? null
+						: hyxFiles(archive.entries.map(item => item.name), parsed.authors);
 
-					return { parsed, logo, hyx, totalSize: archive.totalSize };
+					return { parsed, logo, hyx, totalSize: archive.totalSize, steamMeta: archive.steamMeta ?? null, tooSmall };
 				}));
 
-				const { parsed, logo, hyx, totalSize } = result;
+				const { parsed, logo, hyx, totalSize, steamMeta, tooSmall } = result;
+
+				if (steamMeta) {
+					updatePackSteamManifest.run(steamMeta.sha1 ?? null, steamMeta.fileSize ?? totalSize, row.id);
+
+					if (steamMeta.fileName) {
+						const base = steamMeta.fileName.split(/[\\/]/).pop();
+
+						if (base && base !== row.file_name) {
+							updateFileName.run(base, row.id);
+						}
+					}
+				}
+
+				if (tooSmall) {
+					const reason = `меньше ${config.steamMinQuestions} вопросов (${parsed.questionCount})`;
+					updateJunk.run(parsed.name, totalSize, parsed.questionCount, reason, Date.now(), row.id);
+					junk++;
+					say('parse', `${label} ${display} -> отсеян (junk): «${parsed.name}», ${reason}`);
+					return;
+				}
 
 				// Не подписался в файле — подписывается страницей ВК, с которой
 				// пак выложен (см. authorsOrVk выше)
@@ -273,6 +346,14 @@ export async function parsePackages() {
 					row.id,
 				);
 
+				// При обновлении Steam-пака «на месте» сбрасываем разметку Gemini,
+				// только если состав тем изменился ощутимо (> 15%), чтобы правка
+				// опечатки или медиафайла не сжигала квоту модели (раздел 5.4)
+				if (row.recheck === 1 && isSteamPack(row) && row.topics_at !== null
+					&& themesChangedShare(row.rounds, parsed.rounds) > 0.15) {
+					resetSteamTopics.run(row.id);
+				}
+
 				saveAuthors(row.id, authors);
 
 				// Отпечатки вопросов — здесь же, из того же разбора. Отдельный шаг
@@ -298,10 +379,11 @@ export async function parsePackages() {
 					? ''
 					: `, с логотипом${logo.shown ? '' : ' (копию сделать не вышло — доделает шаг «логотипы»)'}`;
 
-				say('parse', `${label} ${row.file_name ?? row.url} -> «${parsed.name}», вопросов ${parsed.questionCount}, `
+				say('parse', `${label} ${display} -> «${parsed.name}», вопросов ${parsed.questionCount}, `
 					+ `${Math.round(totalSize / 1024 / 1024)} МБ${about}`);
 			} catch (error) {
-				const status = error instanceof DeadLinkError ? 'dead' : 'error';
+				const isDead = error instanceof DeadLinkError || error instanceof SteamGoneError;
+				const status = isDead ? 'dead' : 'error';
 
 				if (status === 'dead') {
 					dead++;
@@ -312,10 +394,15 @@ export async function parsePackages() {
 				// Пак уже был разобран: временная ошибка не повод убирать его из выдачи
 				if (status === 'error' && row.status === 'ok') {
 					clearRecheck.run(row.id);
-					say('parse', `${label} ${row.file_name ?? row.url} -> не вышло: ${error.message}; оставляю прежний разбор`);
+					say('parse', `${label} ${display} -> не вышло: ${error.message}; оставляю прежний разбор`);
 				} else {
 					updateFailed.run(status, error.message, Date.now(), row.id);
-					say('parse', `${label} ${row.file_name ?? row.url} -> не вышло: ${error.message}`);
+
+					if (isDead && isSteamPack(row)) {
+						markPackSteamState.run('dead', Date.now(), row.id);
+					}
+
+					say('parse', `${label} ${display} -> не вышло: ${error.message}`);
 				}
 			}
 		},
@@ -323,7 +410,8 @@ export async function parsePackages() {
 
 	say('parse', `разобрано: ${ok} (логотипов ${logos}`
 		+ `${unshown ? `, из них без уменьшенной копии ${unshown}` : ''}`
-		+ `), мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
+		+ `)${junk ? `, отсеяно <${config.steamMinQuestions} вопр.: ${junk}` : ''}`
+		+ `, мёртвых ссылок: ${dead}, прочих ошибок: ${failed}.`);
 }
 
 /**
@@ -431,8 +519,7 @@ export async function fetchLogos() {
 			}
 
 			try {
-				const logo = await retryNetwork(() => withFreshUrl(row, async url => {
-					const archive = await openRemoteZip(url);
+				const logo = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 
 					if (!entry) {

@@ -403,12 +403,34 @@ function parseCentralDirectory(buffer) {
 }
 
 /**
- * Читает оглавление удалённого архива. Дальше из него можно доставать файлы
- * по одному, не перечитывая оглавление заново.
- * @param {string} url ссылка на архив
+ * Читает оглавление ZIP-архива поверх произвольного источника диапазонов
+ * (HTTP Range для ВК или чанкового SteamPipeReader для Мастерской Steam).
+ *
+ * @param {{
+ *   readTail: (length: number) => Promise<{buffer: Buffer, totalSize: number, tailStart: number}>,
+ *   readRange: (from: number, to: number) => Promise<Buffer>,
+ *   readRanges?: (ranges: Array<{from: number, to: number}>) => Promise<Array<{from: number, data: Buffer}>>,
+ * }} source
  */
-export async function openRemoteZip(url) {
-	const { buffer: tail, totalSize, tailStart } = await fetchTail(url, MAX_EOCD_SIZE);
+export async function openZip(source) {
+	const readRange = (from, to) => source.readRange(from, to);
+	const readRanges = source.readRanges
+		? ranges => source.readRanges(ranges)
+		: async ranges => {
+			const parts = [];
+
+			for (const range of ranges) {
+				try {
+					parts.push({ from: range.from, data: await readRange(range.from, range.to) });
+				} catch {
+					// Пропускаем нечитаемый кусок — см. комментарий в fetchRanges
+				}
+			}
+
+			return parts;
+		};
+
+	const { buffer: tail, totalSize, tailStart } = await source.readTail(MAX_EOCD_SIZE);
 
 	if (totalSize > config.maxPackageSize) {
 		throw new Error(`пак слишком большой: ${Math.round(totalSize / 1024 / 1024)} МБ`);
@@ -418,7 +440,7 @@ export async function openRemoteZip(url) {
 
 	const central = location.offset >= tailStart
 		? tail.subarray(location.offset - tailStart, location.offset - tailStart + location.size)
-		: await fetchRange(url, location.offset, location.offset + location.size - 1);
+		: await readRange(location.offset, location.offset + location.size - 1);
 
 	const entries = parseCentralDirectory(central);
 
@@ -456,7 +478,8 @@ export async function openRemoteZip(url) {
 		}
 
 		const guess = 30 + Buffer.byteLength(entry.name, 'utf8') + LOCAL_EXTRA_SLACK;
-		const head = await fetchRange(url, entry.localOffset, entry.localOffset + guess + entry.compressedSize - 1);
+		const maxTo = Math.min(totalSize - 1, entry.localOffset + guess + entry.compressedSize - 1);
+		const head = await readRange(entry.localOffset, maxTo);
 
 		if (head.length < 30) {
 			throw new Error('обрезанный локальный заголовок');
@@ -467,7 +490,7 @@ export async function openRemoteZip(url) {
 
 		if (raw.length < entry.compressedSize) {
 			const from = entry.localOffset + dataOffset + raw.length;
-			const rest = await fetchRange(url, from, entry.localOffset + dataOffset + entry.compressedSize - 1);
+			const rest = await readRange(from, entry.localOffset + dataOffset + entry.compressedSize - 1);
 			raw = Buffer.concat([raw, rest]);
 		}
 
@@ -508,11 +531,11 @@ export async function openRemoteZip(url) {
 		const usable = wanted.filter(entry => entry.compressedSize > 0);
 		const ranges = usable.map(entry => ({
 			from: entry.localOffset,
-			to: entry.localOffset + 30 + Buffer.byteLength(entry.name, 'utf8') + LOCAL_EXTRA_SLACK
-				+ Math.min(bytes, entry.compressedSize) - 1,
+			to: Math.min(totalSize - 1, entry.localOffset + 30 + Buffer.byteLength(entry.name, 'utf8')
+				+ LOCAL_EXTRA_SLACK + Math.min(bytes, entry.compressedSize) - 1),
 		}));
 
-		const parts = await fetchRanges(url, ranges);
+		const parts = await readRanges(ranges);
 		const result = new Map();
 
 		for (const entry of usable) {
@@ -569,7 +592,7 @@ export async function openRemoteZip(url) {
 			to: item.dataStart + Math.min(item.entry.compressedSize, item.from + item.bytes) - 1,
 		}));
 
-		const parts = await fetchRanges(url, ranges);
+		const parts = await readRanges(ranges);
 		const result = new Map();
 
 		usable.forEach((item, index) => {
@@ -627,6 +650,19 @@ export async function openRemoteZip(url) {
 	};
 
 	return { totalSize, entries, find, read, heads, slices, tails, mediaSizes };
+}
+
+/**
+ * Читает оглавление удалённого архива по HTTP Range. Дальше из него можно
+ * доставать файлы по одному, не перечитывая оглавление заново.
+ * @param {string} url ссылка на архив
+ */
+export function openRemoteZip(url) {
+	return openZip({
+		readTail: length => fetchTail(url, length),
+		readRange: (from, to) => fetchRange(url, from, to),
+		readRanges: ranges => fetchRanges(url, ranges),
+	});
 }
 
 function decodeSafe(value) {

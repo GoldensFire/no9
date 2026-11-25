@@ -8,7 +8,6 @@
 // очередь у них конечная и с каждой ночью короче.
 
 import { db } from '../db.js';
-import { openRemoteZip } from '../zip.js';
 import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
@@ -16,7 +15,7 @@ import { measurePackDuration } from '../pack-duration.js';
 import { measureFormats } from '../media-formats.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { force, jobs, reprints } from './options.js';
-import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
+import { buryDeadLink, drain, retryNetwork, withPackArchive } from './pipeline.js';
 import { formatSpan, say } from './progress.js';
 import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
 import { isChosen } from './steps.js';
@@ -129,8 +128,7 @@ export async function fetchPrints() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
-					const archive = await openRemoteZip(url);
+				const parsed = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 
 					if (!entry) {
@@ -257,8 +255,7 @@ export async function fetchDurations() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const { media, packDuration } = await retryNetwork(() => withFreshUrl(row, async url => {
-					const archive = await openRemoteZip(url);
+				const { media, packDuration } = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 					const xml = entry ? await archive.read(entry) : null;
 					const media = await measureMedia(archive);
@@ -363,7 +360,7 @@ export async function fetchFormats() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const formats = await retryNetwork(() => withFreshUrl(row, async url => measureFormats(await openRemoteZip(url))));
+				const formats = await retryNetwork(() => withPackArchive(row, async archive => measureFormats(archive)));
 
 				storeFormats(row.id, formats);
 				ok++;
@@ -429,8 +426,8 @@ export async function fetchHyx() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const names = await retryNetwork(() => withFreshUrl(row, async url =>
-					(await openRemoteZip(url)).entries.map(item => item.name)));
+				const names = await retryNetwork(() => withPackArchive(row, async archive =>
+					archive.entries.map(item => item.name)));
 				let authors = [];
 
 				try {
@@ -503,8 +500,7 @@ export async function fetchSpecials() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const parsed = await retryNetwork(() => withFreshUrl(row, async url => {
-					const archive = await openRemoteZip(url);
+				const parsed = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 
 					if (!entry) {

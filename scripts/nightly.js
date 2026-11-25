@@ -63,6 +63,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { config } from '../src/config.js';
 import { pullPendingRescans, markRescans } from './deploy/rescan.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -211,8 +212,14 @@ const doFresh = onlyFresh || (!process.argv.includes('--no-fresh')
  * при этом не делаются — во втором проходе они те же самые и просто
  * пересматривают всё заново вместе с добавившимся.
  */
-const FRESH_STEPS = 'vk,parse,statsnew,topics,summary,logos,specials,prints,durations,formats,hyx,'
-	+ 'authors,copies,plagiarism,recalc';
+const hasSteam = Boolean(config.steamRefreshToken);
+
+const FRESH_STEPS = [
+	'vk',
+	...(hasSteam ? ['steam'] : []),
+	'parse', 'statsnew', 'topics', 'summary', 'logos', 'specials', 'prints',
+	'durations', 'formats', 'hyx', 'authors', 'copies', 'plagiarism', 'recalc',
+].join(',');
 
 /**
  * Чем ежечасный обход отличается от забега за свежим внутри ночи.
@@ -391,12 +398,20 @@ if (pendingRescans.length > 0) {
 // Первый проход: свежевыложенное, всеми средствами. Короткий — паков там
 // на несколько десятков, — и потому в лимиты Gemini не упирается (см. выше).
 if (doFresh) {
+	if (!hasSteam) {
+		say('Ключа STEAM_REFRESH_TOKEN нет — обход Мастерской Steam пропущен.');
+	}
+
 	say(`Сначала свежее: паки, выложенные за последние ${freshDays} суток.`
 		+ `${onlyFresh ? ' Обсуждения читаются с конца, до первого сообщения старше отсечки.' : ''}`);
 
+	const steamCheckArg = hasSteam && !onlyFresh && !indexerArgs.includes('--steam-check')
+		? ['--steam-check']
+		: [];
+
 	const fresh = await run(process.execPath, ['--no-warnings', 'src/indexer.js',
 		`--steps=${FRESH_STEPS}`, `--fresh=${freshDays}`, `--minutes=${timeLeft()}`, NIGHT_MODEL,
-		...(onlyFresh ? [TAIL, HOUR_FALLBACK] : []), ...indexerArgs]);
+		...(onlyFresh ? [TAIL, HOUR_FALLBACK] : []), ...steamCheckArg, ...indexerArgs]);
 
 	// Сорвавшийся забег ночь не отменяет: он про несколько десятков паков,
 	// а впереди вся остальная база. Молчать о нём нельзя — но и бросать

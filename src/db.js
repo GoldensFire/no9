@@ -172,6 +172,49 @@ CREATE TABLE IF NOT EXISTS pack_duration (
 	measured_at INTEGER NOT NULL
 );
 
+/* Связка с Мастерской Steam (SIGame, AppID 3553500 — см. steam-workshop.md).
+   Хранит все известные элементы Мастерской: и Steam-only паки, и Steam-зеркала
+   ВК-паков. Своей таблицей, а не колонками packages, потому что packages в D1
+   уже на пределе 100 столбцов.
+
+   package_id — собственная строка элемента в packages (source_key = 'steam:<id>'),
+   1-к-1 с этой записью; по нему же едет инкрементальная выгрузка d1_sync и слияние
+   полки (carry.js).
+   target_package_id — на какую карточку сайта вешать ссылку Steam: для Steam-only
+   пака совпадает с package_id, для Steam-дубля ВК-пака или более нового Steam-пака
+   указывает на выживший пак (kept.id), поэтому склейка полностью обратима.
+   is_primary = 1 — главный Steam-дубль для карточки (если их нашлось несколько).
+   state — состояние в Мастерской: 'ok' | 'dead' | 'banned' | 'hidden'.
+   Уезжает наверх вместе с packages (см. TABLES в scripts/export-d1.js). */
+CREATE TABLE IF NOT EXISTS pack_steam (
+	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
+	steam_id TEXT NOT NULL UNIQUE,
+	target_package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
+	is_primary INTEGER NOT NULL DEFAULT 1,
+	hcontent TEXT,
+	sha1 TEXT,
+	creator_id TEXT,
+	title TEXT,
+	file_size INTEGER,
+	subscriptions INTEGER NOT NULL DEFAULT 0,
+	views INTEGER NOT NULL DEFAULT 0,
+	revision INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER,
+	updated_at INTEGER,
+	preview_url TEXT,
+	state TEXT NOT NULL DEFAULT 'ok',
+	synced_at INTEGER NOT NULL
+);
+
+-- Покрывающий указатель для выдачи сайта (steamOf в cf/src/library/steam.js):
+-- отвечает по 24 карточкам страницы прямо из указателя, не поднимая строк.
+CREATE INDEX IF NOT EXISTS ix_pack_steam_target
+	ON pack_steam (target_package_id, state, is_primary, steam_id, subscriptions);
+CREATE INDEX IF NOT EXISTS ix_pack_steam_sha1
+	ON pack_steam (sha1) WHERE sha1 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_pack_steam_creator
+	ON pack_steam (creator_id) WHERE creator_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS pack_prints (
 	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
 	prints BLOB NOT NULL,

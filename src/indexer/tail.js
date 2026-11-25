@@ -33,6 +33,7 @@
 import { getSetting, setSetting } from '../db.js';
 
 const TAIL_KEY = 'vk_tail_at';
+const STEAM_TAIL_KEY = 'steam_tail_at';
 
 /**
  * Насколько раньше своего конца отметка ставится назад.
@@ -67,4 +68,16 @@ export function tailReadUntil() {
  */
 export function noteTailRead(at) {
 	setSetting(TAIL_KEY, String(Math.max(0, at - OVERLAP_MS)));
+}
+
+/** Миг, до которого прошлый обход Мастерской Steam дочитал обновления. */
+export function steamTailReadUntil() {
+	const stored = Number(getSetting(STEAM_TAIL_KEY));
+
+	return Number.isFinite(stored) && stored > 0 ? stored : null;
+}
+
+/** Запомнить, что обновления Мастерской Steam прочитаны до этого мига. */
+export function noteSteamTailRead(at) {
+	setSetting(STEAM_TAIL_KEY, String(Math.max(0, at - OVERLAP_MS)));
 }

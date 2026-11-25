@@ -50,10 +50,10 @@ const dbPath = path.join(root, 'data', 'sibase.db');
 const outPath = path.join(root, 'cf', 'data');
 
 /**
- * Порядок важен: stats, pack_formats, pack_duration и pack_authors ссылаются на packages,
- * поэтому создаются позже него, а удаляются раньше.
+ * Порядок важен: stats, pack_formats, pack_duration, pack_steam и pack_authors
+ * ссылаются на packages, поэтому создаются позже него, а удаляются раньше.
  */
-const TABLES = ['packages', 'stats', 'pack_formats', 'pack_duration', 'pack_authors'];
+const TABLES = ['packages', 'stats', 'pack_formats', 'pack_duration', 'pack_steam', 'pack_authors'];
 
 /**
  * Насколько длинным можно отпускать один запрос, байты. Считаем по объёму,
@@ -283,15 +283,15 @@ function* rowsWithHash(db, table, key, skip = []) {
  * При полной выгрузке ничего этого не надо: там таблицы сносятся целиком,
  * и спорить за ключи не с кем.
  */
-function writeGuard(writer, rows) {
+function writeGuard(writer, table, keyCol, uniqueCol, rows) {
 	if (rows.length === 0) {
 		return;
 	}
 
-	const keys = rows.map(row => literal(row.sourceKey)).join(',');
+	const keys = rows.map(row => literal(row.uniqueVal)).join(',');
 	const ids = rows.map(row => String(row.id)).join(',');
 
-	writer.write(`DELETE FROM packages WHERE source_key IN (${keys}) AND id NOT IN (${ids});\n`);
+	writer.write(`DELETE FROM ${table} WHERE ${uniqueCol} IN (${keys}) AND ${keyCol} NOT IN (${ids});\n`);
 }
 
 /** Готовый INSERT … ON CONFLICT: обновляет всё, кроме ключа. */
@@ -418,6 +418,7 @@ function main() {
 			stats: new Set(db.prepare('SELECT package_id FROM stats').all().map(row => row.package_id)),
 			pack_formats: new Set(db.prepare('SELECT package_id FROM pack_formats').all().map(row => row.package_id)),
 			pack_duration: new Set(db.prepare('SELECT package_id FROM pack_duration').all().map(row => row.package_id)),
+			pack_steam: new Set(db.prepare('SELECT package_id FROM pack_steam').all().map(row => row.package_id)),
 			pack_authors: new Set(db.prepare('SELECT DISTINCT package_id FROM pack_authors').all().map(row => row.package_id)),
 		};
 
@@ -432,15 +433,18 @@ function main() {
 		}
 	}
 
-	// ————— packages, stats, pack_formats и pack_duration —————
+	// ————— packages, stats, pack_formats, pack_duration и pack_steam —————
 
-	// Какие колонки в отпечаток не входят — и почему их две, — сказано там же,
+	// Какие колонки в отпечаток не входят — и почему, — сказано там же,
 	// где считается сам отпечаток (см. SKIP в scripts/deploy/rowhash.js).
-	for (const [table, key] of [
-		['packages', 'id'],
-		['stats', 'package_id'],
-		['pack_formats', 'package_id'],
-		['pack_duration', 'package_id'],
+	// Третий элемент — дополнительная UNIQUE-колонка, от конфликта по которой
+	// при перенумерации страхует writeGuard (packages.source_key и pack_steam.steam_id).
+	for (const [table, key, uniqueCol] of [
+		['packages', 'id', 'source_key'],
+		['stats', 'package_id', null],
+		['pack_formats', 'package_id', null],
+		['pack_duration', 'package_id', null],
+		['pack_steam', 'package_id', 'steam_id'],
 	]) {
 		const skip = SKIP[table] ?? [];
 
@@ -452,9 +456,9 @@ function main() {
 
 		const known = before.get(table);
 		const changed = [];
-		// Пары «номер строки — ключ документа» тех паков, что уходят в этой пачке.
-		// Нужны только packages и только при неполной выгрузке (см. guard ниже)
-		const guard = table === 'packages' && !whole ? [] : null;
+		// Пары «первичный ключ — дополнительный UNIQUE-ключ» для страховки от
+		// перенумерации (см. writeGuard выше). Нужны только при неполной выгрузке.
+		const guard = uniqueCol && !whole ? [] : null;
 		let head = null;
 		let tail = null;
 		let seen = 0;
@@ -467,7 +471,7 @@ function main() {
 			}
 
 			if (guard) {
-				writeGuard(writer, guard.splice(0));
+				writeGuard(writer, table, key, uniqueCol, guard.splice(0));
 			}
 
 			batched(writer, head, tail, changed.splice(0));
@@ -487,7 +491,7 @@ function main() {
 
 			sent++;
 			changed.push(`(${item.columns.map(column => literal(item.row[column])).join(',')})`);
-			guard?.push({ id: item.id, sourceKey: item.row.source_key });
+			guard?.push({ id: item.id, uniqueVal: item.row[uniqueCol] });
 
 			// Не копим весь список в памяти: на полной выгрузке это была бы вся база
 			if (changed.length >= 500) {

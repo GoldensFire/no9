@@ -247,6 +247,17 @@ export const config = {
 	youtubeApiKey: readSecret('YOUTUBE_API_KEY', 'youtube-api-key.txt'),
 
 	/**
+	 * Refresh Token сервисного аккаунта Steam (JWT) для чтения депо Мастерской
+	 * SIGame через SteamPipe (src/steam/). Кладётся в data/steam-refresh-token.txt
+	 * или в переменную STEAM_REFRESH_TOKEN; логин и пароль нигде не хранятся.
+	 * Получается один раз скриптом `node scripts/steam-login.js`.
+	 */
+	steamRefreshToken: readSecret('STEAM_REFRESH_TOKEN', 'steam-refresh-token.txt'),
+
+	/** AppID и депо Мастерской SIGame в Steam. */
+	steamAppId: 3553500,
+
+	/**
 	 * Вход через Discord. Приложение заводится на https://discord.com/developers/applications,
 	 * там же в OAuth2 → Redirects прописывается адрес возврата (см. discordRedirectUri).
 	 * Идентификатор и секрет кладутся в data/discord-client-id.txt и data/discord-client-secret.txt

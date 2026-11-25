@@ -161,6 +161,7 @@ export const track = step => tracks.get(step);
 /** Строка в лог от имени шага: полосы идут вперемешку, и без подписи их не разобрать. */
 export const TAGS = {
 	vk: 'ВК',
+	steam: 'Steam',
 	parse: 'разбор',
 	stats: 'статистика',
 	statsnew: 'статистика новых',

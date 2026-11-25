@@ -167,8 +167,15 @@ export function carryMarkup(from, into) {
 				continue;
 			}
 
+			const refCol = part.refColumn && shared.includes(part.refColumn) ? part.refColumn : null;
 			const list = ['package_id', ...shared].map(column => `"${column}"`).join(', ');
-			const select = ['m.id', ...shared.map(column => `st."${column}"`)].join(', ');
+			const select = [
+				'm.id',
+				...shared.map(column => (column === refCol ? 'COALESCE(tm.id, m.id)' : `st."${column}"`)),
+			].join(', ');
+			const refJoin = refCol
+				? `\n\t\t\t\tLEFT JOIN src.packages tp ON tp.id = st."${refCol}"\n\t\t\t\tLEFT JOIN main.packages tm ON tm.source_key = tp.source_key`
+				: '';
 			const set = shared.map(column => `"${column}" = excluded."${column}"`).join(', ');
 
 			db.exec('BEGIN');
@@ -178,7 +185,7 @@ export function carryMarkup(from, into) {
 				SELECT ${select}
 				FROM src."${part.table}" st
 				JOIN src.packages sp ON sp.id = st.package_id
-				JOIN main.packages m ON m.source_key = sp.source_key
+				JOIN main.packages m ON m.source_key = sp.source_key${refJoin}
 				WHERE st."${part.at}" IS NOT NULL
 				ON CONFLICT (package_id) DO UPDATE SET ${set}
 				WHERE "${part.table}"."${part.at}" IS NULL OR excluded."${part.at}" > "${part.table}"."${part.at}"
@@ -356,17 +363,23 @@ function carryPacks(from, into) {
 		const numberTaken = db.prepare('SELECT id, source_key, name FROM main.packages WHERE id = ?');
 		const movePackId = db.prepare('UPDATE main.packages SET id = ? WHERE id = ?');
 		const moveCopyOf = hasCopyOf ? db.prepare('UPDATE main.packages SET copy_of = ? WHERE copy_of = ?') : null;
+		const hasSteamTarget = hasTable('main', 'pack_steam')
+			&& columnsOf(db, 'main', 'pack_steam').includes('target_package_id');
+		const moveSteamTarget = hasSteamTarget
+			? db.prepare('UPDATE main.pack_steam SET target_package_id = ? WHERE target_package_id = ?')
+			: null;
 		const moveChildren = childTables.map(name => db.prepare(`UPDATE main."${name}" SET package_id = ? WHERE package_id = ?`));
 
 		const relocateLocal = (oldId, newId) => {
 			movePackId.run(newId, oldId);
 			moveCopyOf?.run(newId, oldId);
+			moveSteamTarget?.run(newId, oldId);
 			for (const stmt of moveChildren) {
 				stmt.run(newId, oldId);
 			}
 		};
 
-		// Статистика, авторы, длительность и форматы — по номеру пака
+		// Статистика, авторы, длительность, форматы и связка Steam — по номеру пака
 		const carryChild = table => {
 			const columns = shared(table);
 
@@ -375,17 +388,38 @@ function carryPacks(from, into) {
 			}
 
 			return {
+				table,
 				columns,
 				take: db.prepare(`SELECT ${quoted(columns)} FROM src."${table}" WHERE package_id = ?`),
 				put: db.prepare(`INSERT OR REPLACE INTO main."${table}" (${quoted(columns)}) VALUES (${holes(columns)})`),
 			};
 		};
 
-		const packChildren = ['stats', 'pack_authors', 'pack_duration', 'pack_formats']
+		const packChildren = ['stats', 'pack_authors', 'pack_duration', 'pack_formats', 'pack_steam']
 			.map(carryChild)
 			.filter(Boolean);
 
-		const move = (row, columns, fromId, toId) => columns.map(column => (column === 'package_id' ? toId : row[column]));
+		const findTargetInMain = db.prepare(`
+			SELECT m.id FROM src.packages sp
+			JOIN main.packages m ON m.source_key = sp.source_key
+			WHERE sp.id = ?
+		`);
+
+		const move = (row, columns, fromId, toId) => columns.map(column => {
+			if (column === 'package_id') {
+				return toId;
+			}
+
+			if (column === 'target_package_id') {
+				if (row[column] === fromId) {
+					return toId;
+				}
+
+				return findTargetInMain.get(row[column])?.id ?? toId;
+			}
+
+			return row[column];
+		});
 
 		db.exec('BEGIN');
 

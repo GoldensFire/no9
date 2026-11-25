@@ -6,12 +6,19 @@
 // свойство самого устройства обхода: разбор берёт паки, которые обход ВК ещё
 // только находит, статистика и модель — те, что разбор ещё только разбирает.
 
-import { DeadLinkError, StaleLinkError } from '../zip.js';
+import { db } from '../db.js';
+import { DeadLinkError, openRemoteZip, StaleLinkError } from '../zip.js';
 import { hasVkApi, refreshDocumentUrl } from '../vkapi.js';
+import { isSteamTransientError, openSteamPack, SteamGoneError } from '../steam/session.js';
 import { limit, outOfTime } from './options.js';
 import { track } from './progress.js';
 import { isRunning, STEPS } from './steps.js';
-import { updateFailed, updateUrl } from './store.js';
+import { markPackSteamState, updateFailed, updateUrl } from './store.js';
+
+const readSteamManifest = db.prepare('SELECT steam_id, hcontent, state FROM pack_steam WHERE package_id = ?');
+
+/** Является ли строка паком из Мастерской Steam (source_key = 'steam:<id>'). */
+export const isSteamPack = row => Boolean(row?.source_key?.startsWith('steam:'));
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -120,6 +127,7 @@ export async function drain({ step, jobs, take, work, group = null, stop = () =>
  */
 function isNetworkGlitch(error) {
 	return error instanceof StaleLinkError
+		|| isSteamTransientError(error)
 		|| /terminated|fetch failed|ECONNRESET|ETIMEDOUT|socket hang up/i.test(error.message);
 }
 
@@ -174,6 +182,34 @@ export async function withFreshUrl(row, action) {
 }
 
 /**
+ * Единая точка открытия архива пака (ВК или Мастерская Steam).
+ *
+ * Для ВК идёт прежний путь withFreshUrl + openRemoteZip; для Steam-паков
+ * (source_key = 'steam:<id>') — чанковый SteamPipeReader поверх одной общей
+ * сессии CM на прогон. Если Steam-пак был «повышен» ВК-дублем (url <> '')
+ * и сам элемент Мастерской удалён — прозрачно читаем по его ВК-ссылке.
+ */
+export async function withPackArchive(row, action) {
+	if (isSteamPack(row)) {
+		const info = readSteamManifest.get(row.id);
+
+		if (info && info.state === 'ok' && info.hcontent && info.hcontent !== '0') {
+			const archive = await openSteamPack({ steamId: info.steam_id, hcontent: info.hcontent });
+			return action(archive);
+		}
+
+		// Если элемент Мастерской пропал, но у карточки есть живое ВК-зеркало — читаем оттуда
+		if (row.url) {
+			return action(await openRemoteZip(row.url));
+		}
+
+		throw new SteamGoneError(`для пака ${row.source_key} нет живого манифеста Steam`);
+	}
+
+	return withFreshUrl(row, async url => action(await openRemoteZip(url)));
+}
+
+/**
  * Пак, до файла которого больше не добраться, — мёртвый пак.
  *
  * ————— зачем это понадобилось всем шагам сразу —————
@@ -222,7 +258,7 @@ let buried = 0;
 let buryStopped = false;
 
 export function buryDeadLink(row, error) {
-	if (!(error instanceof DeadLinkError)) {
+	if (!(error instanceof DeadLinkError || error instanceof SteamGoneError)) {
 		return false;
 	}
 
@@ -230,7 +266,7 @@ export function buryDeadLink(row, error) {
 		if (!buryStopped) {
 			buryStopped = true;
 			console.error(`[обход] мёртвых ссылок за один запуск больше ${BURY_LIMIT} — `
-				+ 'это не удалённые паки, а отказ ВК отдавать файлы. Больше никого не хороню; '
+				+ 'это не удалённые паки, а отказ источника отдавать файлы. Больше никого не хороню; '
 				+ 'кто и правда удалён, дождётся следующей ночи.');
 		}
 
@@ -239,6 +275,10 @@ export function buryDeadLink(row, error) {
 
 	buried++;
 	updateFailed.run('dead', error.message, Date.now(), row.id);
+
+	if (isSteamPack(row)) {
+		markPackSteamState.run('dead', Date.now(), row.id);
+	}
 
 	return true;
 }

@@ -107,6 +107,8 @@ import { has, serial } from './indexer/options.js';
 import { report, TAGS, Track, track, tracks } from './indexer/progress.js';
 import { beginRun, isChosen, markFinished, selectedSteps } from './indexer/steps.js';
 import { scanVk } from './indexer/vk-scan.js';
+import { scanSteam } from './indexer/steam-scan.js';
+import { closeSteamSession } from './steam/session.js';
 import { fetchLogos, hasThumb, parsePackages } from './indexer/parse.js';
 import { fetchDurations, fetchFormats, fetchHyx, fetchPrints, fetchSpecials } from './indexer/backfill.js';
 import { refreshStats } from './indexer/sistats.js';
@@ -127,7 +129,15 @@ function printSummary() {
 	// их нет, но в базе они есть и вернутся, если автор перезальёт пак
 	// с файлами внутри (см. recalcOffsite в src/indexer/recalc.js)
 	const offsite = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'offsite'`).get().c;
+	const junk = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'junk'`).get().c;
 	const waiting = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'new'`).get().c;
+	const steamTotal = db.prepare('SELECT COUNT(*) AS c FROM pack_steam').get().c;
+	const steamOnly = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND url = ''`).get().c;
+	const steamLinked = db.prepare(`
+		SELECT COUNT(DISTINCT ps.target_package_id) AS c
+		FROM pack_steam ps JOIN packages p ON p.id = ps.target_package_id
+		WHERE ps.state = 'ok' AND ps.is_primary = 1 AND p.status = 'ok' AND p.url <> ''
+	`).get().c;
 	const withStats = db.prepare('SELECT COUNT(*) AS c FROM stats WHERE found = 1').get().c;
 	const withLogo = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE logo_state = 'ok'`).get().c;
 	// Логотип по базе есть, а показать его нечем: строка пака уедет наверх
@@ -167,7 +177,11 @@ function printSummary() {
 	console.log(`Паков в базе: ${total} (разобрано ${parsed}, мёртвых ссылок ${deadLinks}, с ошибками ${errors}`
 		+ `${gone > 0 ? `, убрано из обсуждения ${gone}` : ''}`
 		+ `${offsite > 0 ? `, на чужих ссылках ${offsite}` : ''}`
+		+ `${junk > 0 ? `, отсеяно как пустышки ${junk}` : ''}`
 		+ `${waiting > 0 ? `, ждут разбора ${waiting}` : ''})`);
+	if (steamTotal > 0) {
+		console.log(`Мастерская Steam: записей ${steamTotal} (Steam-only на сайте ${steamOnly}, ВК-паков со Steam-дублем ${steamLinked}).`);
+	}
 	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}`
 		+ `${noThumb > 0 ? ` (показать нечем у ${noThumb} — их доделает шаг «логотипы»)` : ''}`
 		+ `. С описанием: ${described}. С предметом: ${withSubject}.`);
@@ -243,6 +257,7 @@ if (has('--gemini-usage')) {
  */
 const RUNNERS = {
 	vk: scanVk,
+	steam: scanSteam,
 	parse: parsePackages,
 	stats: () => refreshStats('all'),
 	statsnew: () => refreshStats('new'),
@@ -320,7 +335,11 @@ for (const step of steps) {
 	started.set(step.key, runStep(step, serial ? [...started.values()] : waitFor));
 }
 
-await Promise.all(started.values());
+try {
+	await Promise.all(started.values());
+} finally {
+	closeSteamSession();
+}
 
 printSummary();
 

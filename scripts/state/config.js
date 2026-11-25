@@ -142,6 +142,18 @@ export const MARKUP_TABLES = [
 		at: 'checked_at',
 		columns: ['formats', 'checked_at'],
 	},
+	{
+		name: 'данные Мастерской Steam',
+		table: 'pack_steam',
+		at: 'synced_at',
+		// target_package_id перепривязывается через source_key целевого пака (см. carryMarkup)
+		refColumn: 'target_package_id',
+		columns: [
+			'steam_id', 'target_package_id', 'is_primary', 'hcontent', 'sha1', 'creator_id',
+			'title', 'file_size', 'subscriptions', 'views', 'revision',
+			'created_at', 'updated_at', 'preview_url', 'state', 'synced_at',
+		],
+	},
 ];
 
 /**

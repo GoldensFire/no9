@@ -113,17 +113,21 @@ export async function mergeAuthors() {
 	// пак, снятый как выложенный не автором: тоже (см. «перезаливы»)
 	const rows = db.prepare(`
 		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account,
+			ps.creator_id AS steam_creator,
+			(p.source_key LIKE 'steam:%') AS is_steam,
 			(SELECT COUNT(*) FROM pack_authors b WHERE b.package_id = a.package_id) > 1 AS shared,
 			(p.status = 'copy' OR CAST(COALESCE(p.copy_of, p.id) AS TEXT) IN (SELECT value FROM json_each(?))) AS reupload,
 			COUNT(*) AS packs,
 			SUM(CASE WHEN p.status = 'ok' THEN 1 ELSE 0 END) AS live
-		FROM pack_authors a JOIN packages p ON p.id = a.package_id
-		GROUP BY a.author_key, a.author, p.vk_author_url, shared, reupload
+		FROM pack_authors a
+		JOIN packages p ON p.id = a.package_id
+		LEFT JOIN pack_steam ps ON ps.package_id = p.id
+		GROUP BY a.author_key, a.author, p.vk_author_url, ps.creator_id, is_steam, shared, reupload
 	`).all(JSON.stringify(reuploads));
 
 	/**
-	 * Подпись -> {написания, из них живые, аккаунты одиночных паков,
-	 * аккаунты всех паков, сколько паков}.
+	 * Подпись -> {написания, из них живые, аккаунты одиночных паков ВК,
+	 * аккаунты всех паков ВК, SteamID64 одиночных/всех Steam-паков, сколько паков}.
 	 */
 	const signatures = new Map();
 
@@ -131,7 +135,16 @@ export async function mergeAuthors() {
 		let item = signatures.get(row.key);
 
 		if (!item) {
-			item = { key: row.key, spellings: new Map(), live: new Map(), accounts: new Set(), seen: new Set(), packs: 0 };
+			item = {
+				key: row.key,
+				spellings: new Map(),
+				live: new Map(),
+				accounts: new Set(),
+				seen: new Set(),
+				steamCreators: new Set(),
+				steamSeen: new Set(),
+				packs: 0,
+			};
 			signatures.set(row.key, item);
 		}
 
@@ -140,6 +153,7 @@ export async function mergeAuthors() {
 		item.packs += row.packs;
 
 		const account = (row.account ?? '').trim();
+		const steamCreator = (row.steam_creator ?? '').trim();
 
 		// Перезалив не говорит о подписи ничего: страница чужая, и даже как
 		// подтверждение опечатки она не годится
@@ -151,13 +165,30 @@ export async function mergeAuthors() {
 			item.seen.add(account);
 		}
 
+		if (steamCreator) {
+			item.steamSeen.add(steamCreator);
+		}
+
 		// Совместный пак выложил кто-то из соавторов — неизвестно кто
 		if (row.shared) {
 			continue;
 		}
 
-		// Пак, выложенный не через ВК или без адреса автора, аккаунтом
-		// не считается: неизвестность не должна связывать подписи между собой
+		// Steam-only пак (vk_author_url IS NULL) в ВК-ветку не попадает вовсе,
+		// чтобы не отбирать canon_account у ВК-авторов, выкладывающих паки
+		// на обе площадки (раздел 6.1 steam-workshop.md).
+		if (row.is_steam && !account) {
+			if (steamCreator) {
+				item.steamCreators.add(steamCreator);
+			} else {
+				item.steamCreators.add(`?${row.key}`);
+			}
+
+			continue;
+		}
+
+		// Пак, выложенный в ВК без адреса автора, аккаунтом не считается:
+		// неизвестность не должна связывать подписи между собой
 		if (account) {
 			item.accounts.add(account);
 		} else {
@@ -295,6 +326,76 @@ export async function mergeAuthors() {
 		say('authors', `${best}: ${own.map(item => item.key).join(', ')}`);
 	}
 
+	// ————— Steam-only авторы: склейка подписей одного creator_id (раздел 6.1) —————
+	// Трогаем только подписи без единого ВК-аккаунта: canon_account (номер ВК) им не ставится.
+	const bySteamCreator = new Map();
+	const seenBySteamCreator = new Map();
+
+	for (const item of signatures.values()) {
+		if (item.seen.size > 0 || aliased.has(item.key)) {
+			continue;
+		}
+
+		for (const creator of item.steamSeen) {
+			const all = seenBySteamCreator.get(creator) ?? [];
+			all.push(item);
+			seenBySteamCreator.set(creator, all);
+		}
+
+		if (item.steamCreators.size !== 1) {
+			continue;
+		}
+
+		const creator = [...item.steamCreators][0];
+
+		if (creator.startsWith('?')) {
+			continue;
+		}
+
+		const known = bySteamCreator.get(creator) ?? [];
+		known.push(item);
+		bySteamCreator.set(creator, known);
+	}
+
+	const steamAliased = new Set();
+	let steamMerged = 0;
+	let steamPeople = 0;
+
+	for (const [creator, group] of bySteamCreator) {
+		for (const item of group) {
+			const twin = (seenBySteamCreator.get(creator) ?? []).find(other => other !== item
+				&& other.packs > item.packs && nearDuplicate(item.key, other.key));
+
+			if (twin) {
+				write.run(twin.key, mainSpelling(twin), item.key);
+				steamAliased.add(item.key);
+				typos++;
+				say('authors', `${mainSpelling(twin)}: ${item.key} — опечатка (Steam)`);
+			}
+		}
+	}
+
+	for (const [, group] of bySteamCreator) {
+		const own = group.filter(item => !steamAliased.has(item.key));
+
+		if (own.length < 2) {
+			continue;
+		}
+
+		const best = bestSpelling(own.flatMap(item => spellingCounts(item)));
+		const canonKey = own
+			.slice()
+			.sort((a, b) => b.packs - a.packs || a.key.length - b.key.length || a.key.localeCompare(b.key))[0].key;
+
+		for (const item of own) {
+			write.run(canonKey, best, item.key);
+		}
+
+		steamPeople++;
+		steamMerged += own.length - 1;
+		say('authors', `${best} (Steam): ${own.map(item => item.key).join(', ')}`);
+	}
+
 	// Последним, когда люди уже сведены и страницы ВК проставлены: выбор ника
 	// проверяется ровно по ним (см. CHOSEN_NAMES_SQL в src/author-names.js).
 	// Без этого шага каждая ночь возвращала бы автору имя по счёту паков,
@@ -303,7 +404,9 @@ export async function mergeAuthors() {
 	const chosen = db.prepare(APPLY_CHOSEN_NAMES_SQL).run().changes;
 
 	say('authors', `подписей ${signatures.size}; сведено ${merged} лишних к ${people} авторам `
-		+ `(паки выложены с одной страницы ВК); опечаток ${typos}; с номером страницы ${marked}; `
+		+ `(паки выложены с одной страницы ВК)`
+		+ `${steamMerged ? ` и ${steamMerged} к ${steamPeople} авторам Steam` : ''}`
+		+ `; опечаток ${typos}; с номером страницы ${marked}; `
 		+ `строк с ником, выбранным автором, ${chosen}`);
 }
 

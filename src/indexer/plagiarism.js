@@ -206,16 +206,58 @@ export function checkPlagiarism() {
 	say('plagiarism', `приговор устарел у ${stale} паков${queueNote(false)}; `
 		+ 'пересматриваю базу целиком — иначе найденный сегодня старый пак так и останется первоисточником');
 
+	// Связка ВК-страница ↔ SteamID64 по совпавшим пакам-дублям (раздел 6.2):
+	// берём только creator_id, привязанные ровно к ОДНОЙ странице ВК, чтобы чужой
+	// перезаливщик десятков разных авторов не стал «одним человеком» со всеми ними
+	const bridgeRows = db.prepare(`
+		SELECT DISTINCT TRIM(p.vk_author_url) AS vk_url, TRIM(ps.creator_id) AS creator_id
+		FROM pack_steam ps
+		JOIN packages p ON p.id = ps.target_package_id
+		WHERE ps.state = 'ok' AND p.status = 'ok'
+			AND p.vk_author_url IS NOT NULL AND TRIM(p.vk_author_url) <> ''
+			AND ps.creator_id IS NOT NULL AND TRIM(ps.creator_id) <> ''
+	`).all();
+
+	const creatorToVk = new Map();
+
+	for (const row of bridgeRows) {
+		const set = creatorToVk.get(row.creator_id) ?? new Set();
+		set.add(row.vk_url);
+		creatorToVk.set(row.creator_id, set);
+	}
+
+	const vkToSteam = new Map();
+
+	for (const [creatorId, vkUrls] of creatorToVk) {
+		if (vkUrls.size !== 1) {
+			continue;
+		}
+
+		const [vkUrl] = vkUrls;
+		const set = vkToSteam.get(vkUrl) ?? new Set();
+		set.add(creatorId);
+		vkToSteam.set(vkUrl, set);
+	}
+
 	// Отпечатки подшиваются слева: пак, у которого их ещё нет, из счёта
-	// не выпадает — он просто приходит с пустой свёрткой и остаётся ни при чём
+	// не выпадает — он просто приходит с пустой свёрткой и остаётся ни при чём.
+	// Заодно подтягиваются дата самого раннего живого Steam-дубля (для contentTs),
+	// SteamID64 создателей и канонический ключ единственного автора (для samePerson)
 	const rows = db.prepare(`
 		SELECT p.id, p.name, p.vk_ts, p.file_ts, p.vk_author, p.vk_author_url, p.authors_key,
-			q.prints, COALESCE(q.version, 1) AS prints_version
+			q.prints, COALESCE(q.version, 1) AS prints_version,
+			(SELECT MIN(ps.created_at) FROM pack_steam ps
+				WHERE ps.target_package_id = p.id AND ps.state = 'ok' AND ps.created_at > 0) AS steam_created_at,
+			(SELECT GROUP_CONCAT(DISTINCT ps.creator_id) FROM pack_steam ps
+				WHERE ps.target_package_id = p.id AND ps.state = 'ok'
+					AND ps.creator_id IS NOT NULL AND ps.creator_id <> '') AS steam_creators,
+			(SELECT CASE WHEN COUNT(*) = 1 THEN MIN(pa.canon_key) END FROM pack_authors pa
+				WHERE pa.package_id = p.id) AS canon_key
 		FROM packages p LEFT JOIN pack_prints q ON q.package_id = p.id
 		WHERE p.status = 'ok' ORDER BY p.id
 	`).iterate();
 
-	const { verdicts, taken, stats } = reviewPlagiarism(rows, config);
+	const { verdicts, taken, stats } = reviewPlagiarism(rows, config, { vkToSteam });
 
 	// Кто числился вором вчера. Нужны затем, чтобы снять метку с того, кто её
 	// потерял: пак, у которого сменился разбор или у которого нашёлся ещё более

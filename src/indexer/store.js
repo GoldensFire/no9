@@ -419,3 +419,88 @@ export const upsertStats = db.prepare(`
 		updated_at = excluded.updated_at,
 		themes = excluded.themes
 `);
+
+// ————— Мастерская Steam (pack_steam) —————
+
+export const upsertPackSteam = db.prepare(`
+	INSERT INTO pack_steam (
+		package_id, steam_id, target_package_id, is_primary, hcontent, sha1,
+		creator_id, title, file_size, subscriptions, views, revision,
+		created_at, updated_at, preview_url, state, synced_at
+	)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT (package_id) DO UPDATE SET
+		steam_id = excluded.steam_id,
+		target_package_id = excluded.target_package_id,
+		is_primary = excluded.is_primary,
+		hcontent = excluded.hcontent,
+		sha1 = excluded.sha1,
+		creator_id = excluded.creator_id,
+		title = excluded.title,
+		file_size = excluded.file_size,
+		subscriptions = excluded.subscriptions,
+		views = excluded.views,
+		revision = excluded.revision,
+		created_at = excluded.created_at,
+		updated_at = excluded.updated_at,
+		preview_url = excluded.preview_url,
+		state = excluded.state,
+		synced_at = excluded.synced_at
+`);
+
+export const refreshPackSteamMeta = db.prepare(`
+	UPDATE pack_steam SET
+		creator_id = COALESCE(?, creator_id),
+		title = COALESCE(?, title),
+		file_size = COALESCE(?, file_size),
+		subscriptions = ?,
+		views = ?,
+		revision = ?,
+		created_at = COALESCE(?, created_at),
+		updated_at = COALESCE(?, updated_at),
+		preview_url = COALESCE(?, preview_url),
+		state = ?,
+		synced_at = ?
+	WHERE package_id = ?
+`);
+
+export const updatePackSteamManifest = db.prepare(`
+	UPDATE pack_steam SET
+		sha1 = COALESCE(?, sha1),
+		file_size = COALESCE(?, file_size)
+	WHERE package_id = ?
+`);
+
+export const markPackSteamState = db.prepare(`
+	UPDATE pack_steam SET state = ?, synced_at = ? WHERE package_id = ?
+`);
+
+/**
+ * При смене hcontent у элемента Мастерской: ставим переразбор и обновляем file_ts,
+ * не трогая vk_ts (чтобы правка запятой не поднимала старый пак наверх «Новых»).
+ * Разметка Gemini сбрасывается не здесь, а в parse.js — только если темы заметно изменились.
+ */
+export const updateSteamRecheck = db.prepare(`
+	UPDATE packages SET
+		file_ts = ?,
+		recheck = 1,
+		error = NULL,
+		status = CASE WHEN status IN ('dead', 'gone', 'error', 'junk') THEN 'new' ELSE status END
+	WHERE id = ?
+`);
+
+/** Сброс разметки Gemini после ощутимого изменения состава тем при обновлении Steam-пака. */
+export const resetSteamTopics = db.prepare(`
+	UPDATE packages SET topics_version = 0, topics_at = NULL, summary_at = NULL WHERE id = ?
+`);
+
+/** Уточняет имя .siq из манифеста SteamPipe (API QueryFiles его часто отдаёт пустым). */
+export const updateFileName = db.prepare('UPDATE packages SET file_name = ? WHERE id = ?');
+
+/** Отсеянный Steam-пак (< 15 вопросов): сохраняем базовые сведения и статус 'junk'. */
+export const updateJunk = db.prepare(`
+	UPDATE packages SET
+		name = ?, size = ?, question_count = ?, status = 'junk', error = ?,
+		recheck = 0, indexed_at = ?
+	WHERE id = ?
+`);

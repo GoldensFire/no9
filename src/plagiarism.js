@@ -391,12 +391,31 @@ function sameWeight(a, b) {
 export function contentTs(row) {
 	const posted = row.vk_ts ?? null;
 	const uploaded = row.file_ts ?? null;
+	const steamCreated = row.steam_created_at > 0 ? row.steam_created_at : null;
 
-	if (posted === null) {
+	// Если файл перезалит ПОЗЖЕ поста (или обновлён в Steam позже создания),
+	// дата содержимого — дата нового файла (сохраняет защиту от подмены файла
+	// под старым постом и окно неизвестности inTheDark)
+	if (posted !== null && uploaded !== null && uploaded > posted) {
 		return uploaded;
 	}
 
-	return uploaded === null ? posted : Math.max(posted, uploaded);
+	// Если ВК-пак выжил поверх более раннего Steam-дубля, дата первенства —
+	// MIN(vk_ts, steam.created_at), чтобы автор не проиграл спор о первенстве
+	// тому, кто списал пак до выкладки в ВК (раздел 5.1 steam-workshop.md)
+	if (posted !== null && steamCreated !== null) {
+		return Math.min(posted, steamCreated);
+	}
+
+	if (posted !== null) {
+		return posted;
+	}
+
+	if (steamCreated !== null) {
+		return steamCreated;
+	}
+
+	return uploaded;
 }
 
 /**
@@ -414,7 +433,14 @@ export function contentTs(row) {
  * неизвестности тогда нет, потому что нет и второго конца.
  */
 export function contentSince(row) {
-	return row.vk_ts ?? contentTs(row);
+	const posted = row.vk_ts ?? null;
+	const steamCreated = row.steam_created_at > 0 ? row.steam_created_at : null;
+
+	if (posted !== null && steamCreated !== null) {
+		return Math.min(posted, steamCreated);
+	}
+
+	return posted ?? steamCreated ?? contentTs(row);
 }
 
 /**
@@ -490,10 +516,30 @@ function inTheDark(donor, entry) {
  * Пустые значения не сравниваются вовсе: пак без подписи в файле совпал бы
  * по ней с половиной базы, и вся проверка выродилась бы в «все свои».
  */
+function setsIntersect(a, b) {
+	if (!a || !b || a.size === 0 || b.size === 0) {
+		return false;
+	}
+
+	const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+
+	for (const value of small) {
+		if (big.has(value)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 function samePerson(a, b) {
 	return (a.url !== '' && a.url === b.url)
 		|| (a.authors !== '' && a.authors === b.authors)
-		|| (a.author !== '' && a.author === b.author);
+		|| (a.author !== '' && a.author === b.author)
+		|| (a.canonKey !== '' && a.canonKey === b.canonKey)
+		|| setsIntersect(a.steamCreators, b.steamCreators)
+		|| setsIntersect(a.linkedSteam, b.steamCreators)
+		|| setsIntersect(b.linkedSteam, a.steamCreators);
 }
 
 /**
@@ -501,8 +547,15 @@ function samePerson(a, b) {
  * приговор, и ничего больше. Свёртка отпечатков здесь уже разложена и дальше
  * не держится.
  */
-function toEntry(row) {
+function toEntry(row, vkToSteam = null) {
 	const { byPrint, themeSizes, weights } = decodePrints(row.prints, row.prints_version ?? 1);
+	const url = (row.vk_author_url ?? '').trim();
+	const steamCreators = new Set(
+		String(row.steam_creators ?? '')
+			.split(',')
+			.map(s => s.trim())
+			.filter(Boolean),
+	);
 
 	return {
 		id: row.id,
@@ -513,9 +566,12 @@ function toEntry(row) {
 		// …и нижний край той же даты: раньше поста содержимое видно не было.
 		// У обычного пака совпадает с ts, у перезалитого — нет (см. inTheDark)
 		since: contentSince(row),
-		url: (row.vk_author_url ?? '').trim(),
+		url,
 		author: buildAuthorKey(row.vk_author ?? ''),
 		authors: buildAuthorKey(row.authors_key ?? ''),
+		canonKey: (row.canon_key ?? '').trim(),
+		steamCreators,
+		linkedSteam: url && vkToSteam ? (vkToSteam.get(url) ?? null) : null,
 		questions: byPrint,
 		themeSizes,
 		weights,
@@ -573,11 +629,11 @@ const round = value => Math.round(value * 1000) / 1000;
  *        это «ничего не нашлось». Рядом — обратная сторона тех же находок:
  *        у кого что взяли и кто взял (taken)
  */
-export function reviewPlagiarism(rows, limits) {
+export function reviewPlagiarism(rows, limits, { vkToSteam = null } = {}) {
 	const entries = [];
 
 	for (const row of rows) {
-		entries.push(toEntry(row));
+		entries.push(toEntry(row, vkToSteam));
 	}
 
 	// Кто где встречается. Ключ — отпечаток вопроса, значение — паки, в которых
