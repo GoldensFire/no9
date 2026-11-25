@@ -133,41 +133,29 @@ async function sitemapUrls(origin) {
 	// их в тот же миг, когда кто-то тронет выкладку, — то есть уронил бы ночь
 	// на файле, до которого дело всё равно не доходит: в Actions выкладка идёт
 	// только базой (см. dbOnly в options.js), а IndexNow стоит после неё.
-	const { buildSitemap } = await import('../../src/meta/sitemap.js');
+	const { buildSitemaps } = await import('../../src/meta/sitemap.js');
 	const { TOPIC_PAGE_KEYS, subjectPages } = await import('../../src/meta/sections.js');
 	const {
-		listSitemap, listSubjectGroups, getFacets, getLandingPages, getLandingNewest, listAuthorPages,
+		listSitemap, listSubjectGroups, getFacets, getLandingNewest, listAuthorPages,
 	} = await import('../../cf/src/library/pages.js');
 
 	const db = remoteDatabase();
 	const assets = builtAssets();
 	const [rows, groups] = await Promise.all([listSitemap(db), listSubjectGroups(db, assets, ASSET_BASE)]);
 	const facets = await getFacets(db, assets, ASSET_BASE);
-	const [pages, newest, authors] = await Promise.all([
-		getLandingPages(assets, ASSET_BASE),
+	const [newest, authors] = await Promise.all([
 		getLandingNewest(assets, ASSET_BASE),
 		listAuthorPages(assets, ASSET_BASE),
 	]);
 
-	const xml = buildSitemap(rows, origin, {
+	const { parts } = buildSitemaps(rows, origin, {
 		topics: TOPIC_PAGE_KEYS.filter(key => (facets.topics?.[key] ?? 0) > 0),
 		subjects: subjectPages(groups),
-		pages,
 		newest,
 		authors,
 	});
 
-	const found = [];
-
-	for (const block of xml.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
-		const url = /<loc>([^<]+)<\/loc>/.exec(block[1])?.[1];
-
-		if (url) {
-			found.push({ url: unescapeHtml(url), stamp: /<lastmod>([^<]+)<\/lastmod>/.exec(block[1])?.[1] ?? '' });
-		}
-	}
-
-	return found;
+	return parts.flatMap(part => part.entries);
 }
 
 /**
@@ -243,6 +231,19 @@ function isContinuation(url) {
 }
 
 /**
+ * Переведённая копия раздела (/en/, /uk/topic/anime, /kk/for/tech и т. п.).
+ *
+ * В карте сайта переводы разделов остаются (с xhtml:link hreflang), но слать
+ * их в IndexNow при каждом обновлении пака вредно: они составляли 60–75 % всех
+ * пингов и забивали квоту копиями. Реально иноязычные паки (/en/pack/…) сюда
+ * не попадают — их в карте единицы (см. isForeignPack в src/meta/sitemap.js).
+ */
+function isTranslatedSection(url) {
+	const { pathname } = new URL(url);
+	return /^\/(en|uk|kk)(\/|$)/.test(pathname) && !/^\/(en|uk|kk)\/pack\//.test(pathname);
+}
+
+/**
  * Сказать поисковикам, что на сайте изменилось.
  *
  * Отправляется не всё подряд, а только новое и изменившееся: первый запуск
@@ -292,7 +293,8 @@ export async function pingIndexNow() {
 		// поисковику полтысячи адресов за выкладку. Bing называет это «пакетным
 		// режимом» и советует от него отказаться (сентябрь 2026). В карте сайта
 		// они остаются — оттуда робот их и возьмёт.
-		const all = (await sitemapUrls(origin)).filter(item => !isContinuation(item.url));
+		const all = (await sitemapUrls(origin))
+			.filter(item => !isContinuation(item.url) && !isTranslatedSection(item.url));
 
 		// Свежее вперёд: если адресов больше, чем протокол берёт за раз,
 		// уехать должны новые паки, а не хвост позапрошлого года

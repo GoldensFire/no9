@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Разметка эталона 18+</title>
+<style>
+	:root { color-scheme: dark; --bg: #14151a; --panel: #1d1f27; --line: #2c2f3a; --text: #e6e7ec; --dim: #8c90a0; --clean: #3fb27f; --mature: #e0a83a; --bad: #e5534b; }
+	* { box-sizing: border-box; }
+	body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, "Segoe UI", sans-serif; height: 100vh; display: grid; grid-template-columns: 1fr 380px; }
+	main { display: flex; align-items: center; justify-content: center; padding: 16px; min-width: 0; min-height: 0; }
+	main img { max-width: 100%; max-height: calc(100vh - 32px); object-fit: contain; border-radius: 6px; background: #000; }
+	aside { background: var(--panel); border-left: 1px solid var(--line); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+	.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+	.bar i { display: block; height: 100%; background: var(--clean); }
+	.count { color: var(--dim); font-size: 13px; display: flex; justify-content: space-between; }
+	dl { margin: 0; display: grid; gap: 6px; font-size: 13px; }
+	dt { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+	dd { margin: 0 0 4px; overflow-wrap: anywhere; }
+	.choices { display: grid; gap: 6px; }
+	button { font: inherit; color: var(--text); background: #262935; border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; text-align: left; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+	button:hover { background: #2f3342; }
+	button kbd { font: 600 13px ui-monospace, Consolas, monospace; min-width: 18px; text-align: center; color: var(--dim); }
+	button.clean { border-left: 4px solid var(--clean); }
+	button.mature { border-left: 4px solid var(--mature); }
+	button.prohibited { border-left: 4px solid var(--bad); }
+	button.skip { border-left: 4px solid var(--dim); }
+	button.on { outline: 2px solid var(--text); background: #343849; }
+	.nav { display: flex; gap: 6px; }
+	.nav button { flex: 1; justify-content: center; }
+	.hint { color: var(--dim); font-size: 12px; }
+	.done { padding: 40px; text-align: center; font-size: 18px; }
+	@media (max-width: 900px) { body { grid-template-columns: 1fr; grid-template-rows: 55vh auto; height: auto; } main img { max-height: 52vh; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<main><img id="shot" alt=""></main>
+<aside>
+	<div>
+		<div class="count"><span id="place"></span><span id="left"></span></div>
+		<div class="bar"><i id="bar"></i></div>
+	</div>
+	<dl id="about"></dl>
+	<div class="choices" id="choices"></div>
+	<div class="nav">
+		<button id="back"><kbd>←</kbd>Назад</button>
+		<button id="next"><kbd>→</kbd>Дальше</button>
+		<button id="todo"><kbd>N</kbd>К неразмеченной</button>
+	</div>
+	<p class="hint">Клавиша ставит ответ и ведёт дальше. Backspace — стереть ответ. Сомневаешься между двумя — ставь более тяжёлый: так же велено и модели.</p>
+</aside>
+<script>
+let units = [], labels = {}, choices = [], at = 0;
+
+const $ = id => document.getElementById(id);
+
+function show() {
+	const unit = units[at];
+	if (!unit) return;
+	$('shot').src = '/unit/' + unit.id;
+	const done = units.filter(item => labels[item.id]).length;
+	$('place').textContent = (at + 1) + ' из ' + units.length;
+	$('left').textContent = done === units.length ? 'размечено всё' : 'осталось ' + (units.length - done);
+	$('bar').style.width = (100 * done / units.length) + '%';
+
+	const rows = [
+		['Пак', unit.pack.name + ' (№' + unit.pack.id + ')'],
+		['Раунд и тема', unit.round + ' → ' + unit.theme],
+		['Где', (unit.side === 'answer' ? 'сторона ответа' : 'сторона вопроса') + (unit.kind === 'frame' ? ', кадр видео на ' + unit.t + ' с' : '')],
+		['Вопрос', unit.text || '—'],
+		['Ответ', unit.answer || '—'],
+		['Файл', unit.file],
+		...(unit.models ? [['Модели', unit.models]] : []),
+	];
+	const about = $('about');
+	about.replaceChildren();
+	for (const [name, value] of rows) {
+		const dt = document.createElement('dt'); dt.textContent = name;
+		const dd = document.createElement('dd'); dd.textContent = value;
+		about.append(dt, dd);
+	}
+
+	const mine = labels[unit.id];
+	for (const button of $('choices').children) {
+		const choice = choices[button.dataset.index];
+		button.classList.toggle('on', Boolean(mine) && mine.level === choice.level && mine.category === choice.category);
+	}
+}
+
+function move(step) {
+	at = Math.max(0, Math.min(units.length - 1, at + step));
+	show();
+}
+
+function toFirstUnlabelled() {
+	const index = units.findIndex(unit => !labels[unit.id]);
+	at = index === -1 ? units.length - 1 : index;
+	show();
+}
+
+async function answer(key) {
+	const unit = units[at];
+	const choice = choices.find(item => item.key === key);
+	if (key === null) delete labels[unit.id];
+	else labels[unit.id] = { level: choice.level, category: choice.category };
+	const response = await fetch('/api/label', { method: 'POST', body: JSON.stringify({ id: unit.id, key }) });
+	if (!response.ok) { $('left').textContent = 'не сохранилось!'; return; }
+	if (key !== null && at < units.length - 1) at++;
+	show();
+}
+
+addEventListener('keydown', event => {
+	if (event.ctrlKey || event.metaKey || event.altKey) return;
+	const key = event.key.toLowerCase();
+	if (key === 'arrowleft') move(-1);
+	else if (key === 'arrowright') move(1);
+	else if (key === 'n' || key === 'т') toFirstUnlabelled();
+	else if (key === 'backspace') answer(null);
+	else if (key === 'й') answer('q');
+	else if (choices.some(item => item.key === key)) answer(key);
+	else return;
+	event.preventDefault();
+});
+
+$('back').onclick = () => move(-1);
+$('next').onclick = () => move(1);
+$('todo').onclick = toFirstUnlabelled;
+
+fetch('/api/state').then(response => response.json()).then(state => {
+	({ units, labels, choices } = state);
+	if (units.length === 0) {
+		document.querySelector('main').innerHTML = '<p class="done">Набор пуст: сначала node scripts/moderation-bench.js collect</p>';
+		return;
+	}
+	choices.forEach((choice, index) => {
+		const button = document.createElement('button');
+		button.className = choice.level;
+		button.dataset.index = index;
+		const kbd = document.createElement('kbd'); kbd.textContent = choice.key.toUpperCase();
+		button.append(kbd, choice.title);
+		button.onclick = () => answer(choice.key);
+		$('choices').append(button);
+	});
+	toFirstUnlabelled();
+});
+</script>
+</body>
+</html>

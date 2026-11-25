@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-	ASSET, dbPath, force, MARKUP, PERSONAL, prevPath, root, SENT, STAGE, TAG, WORK,
+	ASSET, dbPath, force, MARKUP, MARKUP_TABLES, PERSONAL, prevPath, root, SENT, STAGE, TAG, WORK,
 } from './config.js';
 import { run, sqlPath } from './shelf.js';
 
@@ -139,6 +139,60 @@ export function carryMarkup(from, into) {
 			}
 		}
 
+		// Отдельные таблицы замеров (длительность пака, форматы медиа): связываются
+		// с приёмником по source_key через packages, побеждает более свежая отметка.
+		const shapeOf = (schema, table) => db
+			.prepare(`SELECT sql FROM ${schema}.sqlite_master WHERE type = 'table' AND name = ?`)
+			.get(table)?.sql;
+
+		for (const part of MARKUP_TABLES) {
+			const shape = shapeOf('src', part.table);
+
+			// В базе-источнике таблицы ещё нет (база старше её появления)
+			if (!shape) {
+				continue;
+			}
+
+			// В базе-приёмнике таблицы ещё нет (например, полка старее здешней базы) —
+			// заводим по схеме источника, чтобы не потерять здешние замеры
+			if (!shapeOf('main', part.table)) {
+				db.exec(shape);
+			}
+
+			const hereTable = columnsOf(db, 'main', part.table);
+			const thereTable = columnsOf(db, 'src', part.table);
+			const shared = part.columns.filter(column => hereTable.includes(column) && thereTable.includes(column));
+
+			if (!shared.includes(part.at) || !hereTable.includes('package_id') || !thereTable.includes('package_id')) {
+				continue;
+			}
+
+			const list = ['package_id', ...shared].map(column => `"${column}"`).join(', ');
+			const select = ['m.id', ...shared.map(column => `st."${column}"`)].join(', ');
+			const set = shared.map(column => `"${column}" = excluded."${column}"`).join(', ');
+
+			db.exec('BEGIN');
+
+			const { changes } = db.prepare(`
+				INSERT INTO main."${part.table}" (${list})
+				SELECT ${select}
+				FROM src."${part.table}" st
+				JOIN src.packages sp ON sp.id = st.package_id
+				JOIN main.packages m ON m.source_key = sp.source_key
+				WHERE st."${part.at}" IS NOT NULL
+				ON CONFLICT (package_id) DO UPDATE SET ${set}
+				WHERE "${part.table}"."${part.at}" IS NULL OR excluded."${part.at}" > "${part.table}"."${part.at}"
+			`).run();
+
+			db.exec('COMMIT');
+
+			const moved = Number(changes);
+
+			if (moved > 0) {
+				done.push({ name: part.name, moved });
+			}
+		}
+
 		// Расход квоты — тоже общее знание, и терять его нельзя ни в какую сторону.
 		// Считает Google по своим суткам и по всему ключу разом, а тратят ключ обе
 		// машины; больший расход за день и есть правда о нём. Знай ночь про это,
@@ -223,7 +277,7 @@ export function sayCarried(done, where) {
  * заводится под новым, и это по-прежнему лучше, чем потерять его совсем.
  */
 function carryPacks(from, into) {
-	const nothing = { packs: 0, renumbered: 0 };
+	const nothing = { packs: 0, relocated: 0, renumbered: 0, collisions: [] };
 
 	if (!fs.existsSync(from) || !fs.existsSync(into)) {
 		return nothing;
@@ -231,9 +285,14 @@ function carryPacks(from, into) {
 
 	const db = new DatabaseSync(into);
 	let packs = 0;
+	let relocated = 0;
 	let renumbered = 0;
+	const collisions = [];
 
 	try {
+		// Временно выключаем проверку внешних ключей на время переноса id
+		// локального неопубликованного пака в рамках одной транзакции.
+		db.exec('PRAGMA foreign_keys = OFF');
 		db.exec(`ATTACH '${sqlPath(from)}' AS src`);
 
 		// Общие колонки: базы бывают разного возраста, и та, что постарше,
@@ -256,62 +315,116 @@ function carryPacks(from, into) {
 		const strangers = db.prepare(`
 			SELECT ${quoted(packColumns)} FROM src.packages s
 			WHERE NOT EXISTS (SELECT 1 FROM main.packages m WHERE m.source_key = s.source_key)
+			ORDER BY s.id ASC
 		`).all();
 
 		if (strangers.length === 0) {
 			return nothing;
 		}
 
-		const bare = packColumns.filter(column => column !== 'id');
+		const hasTable = (schema, name) => Boolean(
+			db.prepare(`SELECT 1 AS yes FROM ${schema}.sqlite_master WHERE type = 'table' AND name = ?`).get(name),
+		);
+
+		// Все локальные таблицы, ссылающиеся на packages.id через package_id
+		// (stats, pack_authors, pack_formats, pack_duration, pack_prints, played, planned, question_origins).
+		const childTables = db.prepare(`
+			SELECT name FROM main.sqlite_master
+			WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+		`).all()
+			.map(row => row.name)
+			.filter(name => columnsOf(db, 'main', name).includes('package_id'));
+
+		const hasCopyOf = columnsOf(db, 'main', 'packages').includes('copy_of');
+		const checkSynced = hasTable('main', 'd1_sync')
+			? db.prepare(`SELECT 1 AS yes FROM main.d1_sync WHERE tbl = 'packages' AND row_id = ?`)
+			: null;
+		const checkPinged = hasTable('main', 'indexnow_sent')
+			? db.prepare(`SELECT 1 AS yes FROM main.indexnow_sent WHERE url LIKE ? OR url LIKE ? LIMIT 1`)
+			: null;
+
+		const isPublishedLocally = id => Boolean(
+			checkSynced?.get(id)
+			|| checkPinged?.get(`%/pack/${id}-%`, `%/pack/${id}`),
+		);
+
+		const maxMain = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM main.packages').get().m;
+		const maxSrc = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM src.packages').get().m;
+		let nextFreeId = Math.max(maxMain, maxSrc) + 1;
+
 		const keepNumber = db.prepare(`INSERT INTO main.packages (${quoted(packColumns)}) VALUES (${holes(packColumns)})`);
-		const newNumber = db.prepare(`INSERT INTO main.packages (${quoted(bare)}) VALUES (${holes(bare)})`);
-		const numberTaken = db.prepare('SELECT 1 AS yes FROM main.packages WHERE id = ?');
+		const numberTaken = db.prepare('SELECT id, source_key, name FROM main.packages WHERE id = ?');
+		const movePackId = db.prepare('UPDATE main.packages SET id = ? WHERE id = ?');
+		const moveCopyOf = hasCopyOf ? db.prepare('UPDATE main.packages SET copy_of = ? WHERE copy_of = ?') : null;
+		const moveChildren = childTables.map(name => db.prepare(`UPDATE main."${name}" SET package_id = ? WHERE package_id = ?`));
 
-		// Статистика и авторы — по номеру пака, и номер этот здешний, а не тот,
-		// под которым пак лежал на полке
-		const statColumns = shared('stats');
-		const authorColumns = shared('pack_authors');
+		const relocateLocal = (oldId, newId) => {
+			movePackId.run(newId, oldId);
+			moveCopyOf?.run(newId, oldId);
+			for (const stmt of moveChildren) {
+				stmt.run(newId, oldId);
+			}
+		};
 
-		const takeStats = statColumns.includes('package_id')
-			? db.prepare(`SELECT ${quoted(statColumns)} FROM src.stats WHERE package_id = ?`)
-			: null;
+		// Статистика, авторы, длительность и форматы — по номеру пака
+		const carryChild = table => {
+			const columns = shared(table);
 
-		const putStats = takeStats
-			? db.prepare(`INSERT OR REPLACE INTO main.stats (${quoted(statColumns)}) VALUES (${holes(statColumns)})`)
-			: null;
+			if (!columns.includes('package_id')) {
+				return null;
+			}
 
-		const takeAuthors = authorColumns.includes('package_id')
-			? db.prepare(`SELECT ${quoted(authorColumns)} FROM src.pack_authors WHERE package_id = ?`)
-			: null;
+			return {
+				columns,
+				take: db.prepare(`SELECT ${quoted(columns)} FROM src."${table}" WHERE package_id = ?`),
+				put: db.prepare(`INSERT OR REPLACE INTO main."${table}" (${quoted(columns)}) VALUES (${holes(columns)})`),
+			};
+		};
 
-		const putAuthors = takeAuthors
-			? db.prepare(`INSERT OR REPLACE INTO main.pack_authors (${quoted(authorColumns)}) VALUES (${holes(authorColumns)})`)
-			: null;
+		const packChildren = ['stats', 'pack_authors', 'pack_duration', 'pack_formats']
+			.map(carryChild)
+			.filter(Boolean);
 
-		const move = (row, columns, from, to) => columns.map(column => (column === 'package_id' ? to : row[column]));
+		const move = (row, columns, fromId, toId) => columns.map(column => (column === 'package_id' ? toId : row[column]));
 
 		db.exec('BEGIN');
 
 		for (const row of strangers) {
-			const free = numberTaken.get(row.id) === undefined;
+			const occupant = numberTaken.get(row.id);
 			let id = row.id;
 
-			if (free) {
+			if (!occupant) {
 				keepNumber.run(...packColumns.map(column => row[column]));
+			} else if (!isPublishedLocally(row.id)) {
+				// Полка главная: её пак уже на сайте (D1 / IndexNow), а локальный
+				// двойник ещё не выкладывался. Сдвигаем локальный на свободный номер,
+				// чтобы опубликованный URL /pack/<id>-<slug> никогда не менялся.
+				const freshId = nextFreeId++;
+				relocateLocal(row.id, freshId);
+				keepNumber.run(...packColumns.map(column => row[column]));
+				relocated++;
 			} else {
-				id = Number(newNumber.run(...bare.map(column => row[column])).lastInsertRowid);
+				// Обе машины успели независимо выложить разные паки под одним id:
+				// не переписываем локальный опубликованный id молча, но предупреждаем
+				// громко, чтобы конфликт не прошёл незамеченным.
+				id = nextFreeId++;
+				keepNumber.run(...packColumns.map(column => (column === 'id' ? id : row[column])));
 				renumbered++;
+				collisions.push({ shelfId: row.id, assignedId: id, localName: occupant.name, shelfName: row.name });
 			}
 
-			for (const stat of takeStats?.all(row.id) ?? []) {
-				putStats.run(...move(stat, statColumns, row.id, id));
-			}
-
-			for (const author of takeAuthors?.all(row.id) ?? []) {
-				putAuthors.run(...move(author, authorColumns, row.id, id));
+			for (const child of packChildren) {
+				for (const item of child.take.all(row.id)) {
+					child.put.run(...move(item, child.columns, row.id, id));
+				}
 			}
 
 			packs++;
+		}
+
+		if (hasTable('main', 'sqlite_sequence')) {
+			db.prepare(`UPDATE main.sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'packages'`)
+				.run(nextFreeId - 1);
 		}
 
 		db.exec('COMMIT');
@@ -331,7 +444,7 @@ function carryPacks(from, into) {
 		db.close();
 	}
 
-	return { packs, renumbered };
+	return { packs, relocated, renumbered, collisions };
 }
 
 /**
@@ -433,8 +546,19 @@ export function mergeShelf() {
 		const carried = carryPacks(shelfDb, dbPath);
 
 		if (carried.packs > 0) {
+			const notes = [];
+			if (carried.relocated > 0) {
+				notes.push(`сдвинуто локальных неопубликованных паков: ${carried.relocated} — чтобы не ломать URL полки`);
+			}
+			if (carried.renumbered > 0) {
+				notes.push(`перенумеровано с полки: ${carried.renumbered} — оба id уже публиковались!`);
+			}
 			console.log(`Забрано с полки паков, которых здесь не было: ${carried.packs}`
-				+ `${carried.renumbered > 0 ? ` (из них ${carried.renumbered} с новым номером — прежний тут занят)` : ''}.`);
+				+ `${notes.length > 0 ? ` (${notes.join('; ')})` : ''}.`);
+			for (const item of carried.collisions) {
+				console.warn(`  [!] Конфликт опубликованных ID #${item.shelfId} → #${item.assignedId}:`
+					+ ` дома «${item.localName ?? '?'}», на полке «${item.shelfName ?? '?'}»`);
+			}
 		}
 
 		carrySent(shelfDb, dbPath);

@@ -63,6 +63,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { pullPendingRescans, markRescans } from './deploy/rescan.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const logsPath = path.join(root, 'data', 'nightly');
@@ -351,6 +352,40 @@ say(`Ночной обход базы начат. Отчёт: ${logFile}`);
 // самого workflow, и второй раз её тянуть незачем.
 if (!process.env.GITHUB_ACTIONS) {
 	await run(process.execPath, ['--no-warnings', 'scripts/state.js', 'sync']);
+}
+
+// Точечные заявки админа на перескан паков выбранной моделью Gemini
+// (см. cf/src/library/rescan.js и scripts/deploy/rescan.js). Выполняются
+// до обычных проходов, чтобы уложиться в квоту и уехать на сайт этим же запуском.
+const pendingRescans = await pullPendingRescans();
+
+if (pendingRescans.length > 0) {
+	const byModel = new Map();
+
+	for (const item of pendingRescans) {
+		const list = byModel.get(item.model) ?? [];
+		list.push(item.packId);
+		byModel.set(item.model, list);
+	}
+
+	for (const [model, packIds] of byModel) {
+		say(`Перескан по заявке админа: паки ${packIds.join(', ')} моделью ${model}.`);
+		const code = await run(process.execPath, [
+			'--no-warnings', 'src/indexer.js',
+			'--steps=topics,summary,recalc',
+			`--packs=${packIds.join(',')}`,
+			`--model=${model}`,
+			'--force',
+			`--minutes=${timeLeft()}`,
+		]);
+
+		if (code === 0) {
+			await markRescans(packIds, { status: 'done' });
+		} else {
+			say(`Перескан паков ${packIds.join(', ')} моделью ${model} завершился с кодом ${code}.`);
+			await markRescans(packIds, { status: 'error', error: `код ${code}` });
+		}
+	}
 }
 
 // Первый проход: свежевыложенное, всеми средствами. Короткий — паков там

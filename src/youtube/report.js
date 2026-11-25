@@ -10,8 +10,9 @@ const ytUrl = (v, t = 0) => `https://youtu.be/${v.id}${t > 0 ? `?t=${Math.floor(
 const ytLink = v => `[${v.id}](${ytUrl(v)})`;
 const playLink = (v, p) => `[${hm(p.from)}–${hm(p.to)}](${ytUrl(v, p.from)})`;
 
-export function markdown({ alive, bridge, discovery, results, index, took, stoppedReason }) {
-	const out = ['## Записи YouTube (Gemini Video API)', ''];
+export function markdown({ alive, bridge, discovery, results, index, took, stoppedReason, engine = 'gemini', skippedAge = 0 }) {
+	const label = engine === 'local' ? 'локальный OCR' : (engine === 'hybrid' ? 'гибрид: локальный OCR + Gemini 18+' : 'Gemini Video API');
+	const out = [`## Записи YouTube (${label})`, ''];
 
 	if (alive) {
 		out.push(alive.error
@@ -20,9 +21,10 @@ export function markdown({ alive, bridge, discovery, results, index, took, stopp
 	}
 	if (bridge) {
 		const note = bridge.integrityBlocked ? ' *(socialMedias закрыты Twitch Integrity с этого IP — использованы панели/описания)*' : '';
+		const cached = bridge.skippedCached ? `, в кэше ${bridge.skippedCached}` : '';
 		out.push(bridge.error
 			? `- ⚠️ мост Twitch → YouTube: ${cell(bridge.error)}`
-			: `Мост Twitch → YouTube: проверено ${bridge.checked} Twitch-каналов, найдено ${bridge.added} новых YouTube-каналов.${note}`, '');
+			: `Мост Twitch → YouTube: проверено ${bridge.checked} Twitch-каналов, найдено ${bridge.added} новых YouTube-каналов${cached}.${note}`, '');
 	}
 	if (index) {
 		out.push(`Словарь: ${index.packs.size} паков, ${index.themes.length} тем (${index.ms} мс).`, '');
@@ -43,8 +45,15 @@ export function markdown({ alive, bridge, discovery, results, index, took, stopp
 		const found = results.filter(r => r.res.packs?.length);
 		const calls = results.reduce((a, r) => a + (r.res.calls || 0), 0);
 		const tokens = results.reduce((a, r) => a + (r.res.tokensIn || 0), 0);
-		out.push(`Просмотрено ${results.length} видео, ${calls} вызовов Gemini, ${tokens.toLocaleString('ru-RU')} входных токенов, с паками ${found.length}${took ? `, ${Math.max(1, Math.round(took / 60000))} мин` : ''}.`, '');
-		out.push('| Видео | Канал | Дата | Длина | Вызовы / токены | Итог |', '|---|---|---|---|---|---|');
+		const frames = results.reduce((a, r) => a + (r.res.frames || 0), 0);
+		const parts = [`Просмотрено ${results.length} видео`];
+		if (frames > 0) parts.push(`${frames} кадров OCR`);
+		if (calls > 0) parts.push(`${calls} вызовов Gemini (${tokens.toLocaleString('ru-RU')} ток.)`);
+		if (skippedAge > 0) parts.push(`пропущено 18+: ${skippedAge}`);
+		parts.push(`с паками ${found.length}`);
+		if (took) parts.push(`${Math.max(1, Math.round(took / 60000))} мин`);
+		out.push(`${parts.join(', ')}.`, '');
+		out.push('| Видео | Канал | Дата | Длина | Просмотр | Итог |', '|---|---|---|---|---|---|');
 		for (const { video: v, res: r, source } of results) {
 			let verdict;
 			if (r.status !== 'done') {
@@ -54,13 +63,18 @@ export function markdown({ alive, bridge, discovery, results, index, took, stopp
 				const near = (r.near || []).filter(n => n.themes >= 1).slice(0, 2).map(n => `«${n.pack.name}» #${n.pack.id} ×${n.themes}: ${n.names.slice(0, 3).join('; ')}`);
 				if (near.length) verdict += `${verdict ? '<br>' : ''}<sub>не дотянули: ${near.join(' · ')}</sub>`;
 				if (!verdict) verdict = r.signs > 0 ? 'SIGame, пака нет в базе' : '—';
-				if (r.errors) verdict += `<br><sub>ошибок батчей ${r.errors}: ${r.lastError}</sub>`;
+				if (r.errors) verdict += `<br><sub>ошибок: ${r.errors}: ${r.lastError}</sub>`;
 			}
 			const flags = [v.ageRestricted ? '18+' : '', v.embeddable === false ? 'no-embed' : '', source || ''].filter(Boolean).join(' · ');
 			const titleLine = `${ytLink(v)} ${cell((v.title || '').slice(0, 55))}${flags ? `<br><sub>${cell(flags)}</sub>` : ''}`;
-			out.push(`| ${titleLine} | ${cell(v.channelTitle || v.channelId)} | ${day(v.publishedAt)} | ${hm(v.length)} | ${r.calls ?? 0} / ${r.tokensIn ?? 0} (SIGame: ${r.signs ?? 0}) | ${cell(verdict)} |`);
+			const usageCell = r.engine === 'local'
+				? `${r.frames ?? 0} кадр. (SIGame: ${r.signs ?? 0})`
+				: `${r.calls ?? 0} / ${r.tokensIn ?? 0} (SIGame: ${r.signs ?? 0})`;
+			out.push(`| ${titleLine} | ${cell(v.channelTitle || v.channelId)} | ${day(v.publishedAt)} | ${hm(v.length)} | ${usageCell} | ${cell(verdict)} |`);
 		}
 		out.push('');
+	} else if (skippedAge > 0) {
+		out.push(`Пропущено роликов 18+ (оставлены для Gemini / --cookies): ${skippedAge}.`, '');
 	}
 	return out.join('\n');
 }
@@ -82,10 +96,12 @@ export function details({ video, res, source }) {
 		embeddable: video.embeddable,
 		ageRestricted: video.ageRestricted,
 		source,
+		engine: res.engine || 'gemini',
 		status: res.status,
 		error: res.error,
 		calls: res.calls,
 		tokensIn: res.tokensIn,
+		frames: res.frames || 0,
 		signs: res.signs,
 		planKey: res.planKey,
 		packs: (res.packs || []).map(p => ({

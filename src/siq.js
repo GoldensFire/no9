@@ -17,11 +17,11 @@ export function decodeXml(value) {
 
 export function parseAttributes(source) {
 	const attributes = {};
-	const pattern = /([\w:.-]+)\s*=\s*"([^"]*)"/g;
+	const pattern = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 	let match;
 
 	while ((match = pattern.exec(source)) !== null) {
-		attributes[match[1]] = decodeXml(match[2]);
+		attributes[match[1]] = decodeXml(match[2] ?? match[3]);
 	}
 
 	return attributes;
@@ -269,7 +269,7 @@ export function splitByTag(source, tag) {
  * Возвращается содержимое группы — то есть все варианты разом. Кому из них
  * верить, отсюда не видно и не нужно: в выжимку темы едут все (см. buildSample).
  */
-const OPTIONS_PARAM = /<param\b[^>]*\bname="answerOptions"[^>]*>/;
+const OPTIONS_PARAM = /<param\b[^>]*\bname=(?:"answerOptions"|'answerOptions')[^>]*>/;
 
 function answerOptions(questionBody) {
 	const start = OPTIONS_PARAM.exec(questionBody);
@@ -436,9 +436,9 @@ const RIGHT_BLOCK = /<right\b[^>]*>([\s\S]*?)<\/right>/;
  * <scenario> до метки. Не нашлось ни того, ни другого (бывает у «кота без
  * вопроса») — берётся всё тело как раньше: пустой отпечаток хуже неточного.
  */
-const QUESTION_PARAM = /<param\b[^>]*\bname="question"[^>]*>([\s\S]*?)<\/param>/g;
+const QUESTION_PARAM = /<param\b[^>]*\bname=(?:"question"|'question')[^>]*>([\s\S]*?)<\/param>/g;
 const SCENARIO_BLOCK = /<scenario\b[^>]*>([\s\S]*?)<\/scenario>/;
-const ANSWER_MARKER = /<atom\b[^>]*\btype="marker"[^>]*>/;
+const ANSWER_MARKER = /<atom\b[^>]*\btype=(?:"marker"|'marker')[^>]*>/;
 
 function questionSide(questionBody) {
 	const asked = [...questionBody.matchAll(QUESTION_PARAM)].map(match => match[1]);

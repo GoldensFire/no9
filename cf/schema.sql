@@ -512,7 +512,7 @@ CREATE TABLE IF NOT EXISTS pack_texts (
 -- Ссылок ровно две, и обе отдельными колонками, а не списком: значков на
 -- странице автора два — Discord и Steam, — и каждый из них или есть, или нет.
 -- Список «ссылка + подпись» превратил бы страницу автора в место, куда пишут
--- что угодно и сколько угодно; две именованные колонки этого не позволяют
+-- что угодно и сколько угодно; именованные колонки этого не позволяют
 -- по устройству. Что можно положить в каждую, решает не база, а проверка
 -- при записи (см. cf/src/library/about.js): чужой адрес сюда не ложится вовсе.
 --
@@ -523,6 +523,9 @@ CREATE TABLE IF NOT EXISTS author_texts (
 	body TEXT NOT NULL DEFAULT '',
 	discord TEXT NOT NULL DEFAULT '',
 	steam TEXT NOT NULL DEFAULT '',
+	twitch TEXT NOT NULL DEFAULT '',
+	youtube TEXT NOT NULL DEFAULT '',
+	vk TEXT NOT NULL DEFAULT '',
 	user_id INTEGER REFERENCES users (id) ON DELETE SET NULL,
 	updated_at INTEGER NOT NULL
 );

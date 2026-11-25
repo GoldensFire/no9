@@ -26,6 +26,15 @@ const YT_HEADERS = {
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
+function decodeHtml(s) {
+	return String(s || '')
+		.replace(/&amp;/g, '&')
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>');
+}
+
 /** Каким путём сейчас ходим в YouTube. */
 export function apiMode() {
 	return config.youtubeApiKey ? 'data-v3' : 'innertube';
@@ -197,20 +206,25 @@ function normalizePlayerVideo(id, data) {
 }
 
 /**
- * Поиск видео по запросу. Возвращает массив ID (метаданные добираются пачкой в videosById).
+ * Поиск видео по запросу. Возвращает ID и превью (title/channelTitle/publishedAt/length/isLive),
+ * чтобы шум отсекался ДО пачек videosById.
  *
  * @param {string} query
  * @param {{ publishedAfter?: number, maxPages?: number, days?: number, order?: 'date'|'relevance' }} [opts]
- * @returns {Promise<{ ids: string[], calls: number }>}
+ * @returns {Promise<{ ids: string[], items: Array<object>, calls: number }>}
  */
 export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, days = 7, order = 'date' } = {}) {
 	if (config.youtubeApiKey) {
 		const ids = [];
+		const items = [];
+		const seen = new Set();
 		let pageToken = null;
 		let calls = 0;
 		for (let page = 0; page < maxPages; page++) {
 			const params = {
-				part: 'id',
+				// part=snippet стоит ту же 1 единицу search-бакета, что и part=id,
+				// но сразу отдаёт заголовок, канал и live-статус для отсева до videos.list
+				part: 'snippet',
 				type: 'video',
 				videoDuration: 'long',
 				order: order === 'relevance' ? 'relevance' : 'date',
@@ -224,12 +238,24 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 			calls++;
 			for (const item of data.items || []) {
 				const id = item?.id?.videoId;
-				if (id) ids.push(String(id));
+				if (!id || seen.has(id)) continue;
+				seen.add(id);
+				const sn = item.snippet || {};
+				ids.push(String(id));
+				items.push({
+					id: String(id),
+					channelId: String(sn.channelId || ''),
+					channelTitle: decodeHtml(sn.channelTitle || ''),
+					title: decodeHtml(sn.title || ''),
+					publishedAt: Date.parse(sn.publishedAt) || 0,
+					length: 0,
+					isLive: Boolean(sn.liveBroadcastContent && sn.liveBroadcastContent !== 'none'),
+				});
 			}
 			pageToken = data.nextPageToken || null;
 			if (!pageToken) break;
 		}
-		return { ids, calls };
+		return { ids, items, calls };
 	}
 
 	// Безключевой запасной путь (InnerTube search):
@@ -241,6 +267,7 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 	else if (days > 31 && order !== 'relevance') sp = 'CAISBBgC';
 
 	const ids = [];
+	const items = [];
 	const seen = new Set();
 	let continuation = null;
 	let calls = 0;
@@ -263,17 +290,32 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 				const vr = entry.videoRenderer;
 				if (!vr?.videoId || seen.has(vr.videoId)) continue;
 				const dur = parseClockDuration(vr.lengthText?.simpleText);
+				const isLive = Boolean(
+					(vr.badges || []).some(b => /LIVE/i.test(b.metadataBadgeRenderer?.style || '') || /эфир/i.test(b.metadataBadgeRenderer?.label || ''))
+					|| (!dur && !vr.lengthText?.simpleText)
+				);
 				// Если в выдаче видна длина и ролик короче 15 мин — не тратим на него videosById
 				if (dur > 0 && dur < 900) continue;
 				seen.add(vr.videoId);
+				const title = (vr.title?.runs || []).map(r => r.text).join('') || vr.title?.simpleText || '';
+				const channelTitle = vr.ownerText?.runs?.[0]?.text || '';
 				ids.push(String(vr.videoId));
+				items.push({
+					id: String(vr.videoId),
+					channelId: String(vr.ownerText?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || ''),
+					channelTitle,
+					title,
+					publishedAt: 0,
+					length: dur,
+					isLive,
+				});
 			}
 		}
 
 		continuation = nextToken;
 		if (!continuation) break;
 	}
-	return { ids, calls };
+	return { ids, items, calls };
 }
 
 /**
@@ -339,9 +381,10 @@ export async function videosById(ids) {
 }
 
 /**
- * Извлечь видео ID из сетки InnerTube (поддерживает и lockupViewModel 2026, и videoRenderer).
+ * Извлечь превью видео из сетки InnerTube (поддерживает и lockupViewModel 2026, и videoRenderer).
+ * Возвращает { id, title, length, isLive }, чтобы шум отсеивался ДО player-запросов.
  */
-function extractGridVideos(gridItems) {
+function extractGridVideos(gridItems, channelId = '', channelTitle = '') {
 	const out = [];
 	for (const item of gridItems || []) {
 		const content = item?.richItemRenderer?.content;
@@ -349,17 +392,26 @@ function extractGridVideos(gridItems) {
 		const vr = content.videoRenderer;
 		if (vr?.videoId) {
 			const dur = parseClockDuration(vr.lengthText?.simpleText);
-			if (dur === 0 || dur >= 900) out.push(String(vr.videoId));
+			const isLive = Boolean(
+				(vr.badges || []).some(b => /LIVE/i.test(b.metadataBadgeRenderer?.style || '') || /эфир/i.test(b.metadataBadgeRenderer?.label || ''))
+				|| (!dur && !vr.lengthText?.simpleText)
+			);
+			const title = (vr.title?.runs || []).map(r => r.text).join('') || vr.title?.simpleText || '';
+			out.push({ id: String(vr.videoId), channelId, channelTitle, title, publishedAt: 0, length: dur, isLive });
 			continue;
 		}
 		const lm = content.lockupViewModel;
 		if (lm?.contentId && /^[\w-]{11}$/.test(lm.contentId)) {
-			const badge = lm.contentImage?.thumbnailViewModel?.overlays
-				?.flatMap(o => o.thumbnailBottomOverlayViewModel?.badges || [])
-				?.map(b => b.thumbnailBadgeViewModel?.text)
-				?.find(Boolean);
-			const dur = parseClockDuration(badge);
-			if (dur === 0 || dur >= 900) out.push(String(lm.contentId));
+			const badges = (lm.contentImage?.thumbnailViewModel?.overlays || [])
+				.flatMap(o => o.thumbnailBottomOverlayViewModel?.badges || [])
+				.map(b => b.thumbnailBadgeViewModel)
+				.filter(Boolean);
+			const badgeText = badges.map(b => b.text).find(Boolean) || '';
+			const isLive = badges.some(b => /LIVE/i.test(b.badgeStyle || '') || /эфир/i.test(b.text || ''))
+				|| (!badgeText && badges.length === 0);
+			const dur = parseClockDuration(badgeText);
+			const title = lm.metadata?.lockupMetadataViewModel?.title?.content || '';
+			out.push({ id: String(lm.contentId), channelId, channelTitle, title, publishedAt: 0, length: dur, isLive });
 		}
 	}
 	return out;
@@ -368,17 +420,19 @@ function extractGridVideos(gridItems) {
 /**
  * Последние загрузки канала (через UU-плейлист в Data API v3 с пагинацией
  * или вкладки Видео+Трансляции в InnerTube с continuation).
+ * Возвращает ids и превью items (title, publishedAt, length, isLive) для предфильтрации.
  *
  * @param {string} channelId UC...
- * @param {{ maxResults?: number }} [opts]
- * @returns {Promise<{ ids: string[], calls: number }>}
+ * @param {{ maxResults?: number, channelTitle?: string, publishedAfter?: number }} [opts]
+ * @returns {Promise<{ ids: string[], items: Array<object>, calls: number }>}
  */
-export async function channelUploads(channelId, { maxResults = 25 } = {}) {
-	if (!/^UC[\w-]{20,}$/.test(String(channelId || ''))) return { ids: [], calls: 0 };
+export async function channelUploads(channelId, { maxResults = 25, channelTitle = '', publishedAfter = 0 } = {}) {
+	if (!/^UC[\w-]{20,}$/.test(String(channelId || ''))) return { ids: [], items: [], calls: 0 };
 
 	if (config.youtubeApiKey) {
 		const playlistId = `UU${channelId.slice(2)}`;
 		const ids = [];
+		const items = [];
 		const seen = new Set();
 		let pageToken = null;
 		let calls = 0;
@@ -386,39 +440,60 @@ export async function channelUploads(channelId, { maxResults = 25 } = {}) {
 		for (let page = 0; page < maxPages && ids.length < maxResults; page++) {
 			try {
 				const params = {
-					part: 'contentDetails',
+					// part=snippet,contentDetails стоит ту же 1 единицу, что и part=contentDetails,
+					// но сразу отдаёт title и publishedAt для отсева шума ДО videos.list
+					part: 'snippet,contentDetails',
 					playlistId,
 					maxResults: String(Math.min(50, maxResults - ids.length)),
 				};
 				if (pageToken) params.pageToken = pageToken;
 				const data = await dataGet('playlistItems', params);
 				calls++;
+				let hitOld = false;
 				for (const it of data.items || []) {
-					const id = it?.contentDetails?.videoId;
-					if (id && !seen.has(id)) {
-						seen.add(id);
-						ids.push(String(id));
+					const id = it?.contentDetails?.videoId || it?.snippet?.resourceId?.videoId;
+					if (!id || seen.has(id)) continue;
+					const sn = it.snippet || {};
+					const publishedAt = Date.parse(it.contentDetails?.videoPublishedAt || sn.publishedAt) || 0;
+					if (publishedAfter > 0 && publishedAt > 0 && publishedAt < publishedAfter) {
+						hitOld = true;
+						continue;
 					}
+					seen.add(id);
+					ids.push(String(id));
+					items.push({
+						id: String(id),
+						channelId,
+						channelTitle: sn.channelTitle || channelTitle,
+						title: sn.title || '',
+						publishedAt,
+						length: 0,
+						isLive: false,
+					});
 				}
 				pageToken = data.nextPageToken || null;
-				if (!pageToken) break;
+				if (!pageToken || hitOld) break;
 			} catch (e) {
-				if (e.status === 404) return { ids, calls: calls + 1 };
+				if (e.status === 404) return { ids, items, calls: calls + 1 };
 				if (ids.length) break;
 				throw e;
 			}
 		}
-		return { ids, calls };
+		return { ids, items, calls };
 	}
 
-	// InnerTube: вкладка «Видео» (EgZ2aWRlb3PyBgQKAjoA) и вкладка «Трансляции» (EgdzdHJlYW1z8gYECgJ6AA==)
+	// InnerTube: вкладка «Видео» (EgZ2aWRlb3PyBgQKAjoA) и вкладка «Трансляции» (EgdzdHJlYW1z8gYECgJ6AA==).
+	// Каждой вкладке даём собственный лимит (до maxResults), чтобы канал с 500 видео
+	// не обрезал вкладку «Трансляции», где и лежат записи стримов SIGame.
 	const seen = new Set();
 	const ids = [];
+	const items = [];
 	let calls = 0;
 	const maxTabPages = Math.max(1, Math.ceil(maxResults / 30));
 	for (const params of ['EgZ2aWRlb3PyBgQKAjoA', 'EgdzdHJlYW1z8gYECgJ6AA==']) {
 		let continuation = null;
-		for (let page = 0; page < maxTabPages && ids.length < maxResults; page++) {
+		let tabCount = 0;
+		for (let page = 0; page < maxTabPages && tabCount < maxResults; page++) {
 			try {
 				const payload = continuation ? { continuation } : { browseId: channelId, params };
 				const data = await innertubePost('browse', payload);
@@ -430,10 +505,12 @@ export async function channelUploads(channelId, { maxResults = 25 } = {}) {
 					const tab = (data?.contents?.twoColumnBrowseResultsRenderer?.tabs || []).find(t => t.tabRenderer?.selected);
 					grid = tab?.tabRenderer?.content?.richGridRenderer?.contents || [];
 				}
-				for (const id of extractGridVideos(grid)) {
-					if (!seen.has(id) && ids.length < maxResults) {
-						seen.add(id);
-						ids.push(id);
+				for (const v of extractGridVideos(grid, channelId, channelTitle)) {
+					if (!seen.has(v.id) && tabCount < maxResults) {
+						seen.add(v.id);
+						tabCount++;
+						ids.push(v.id);
+						items.push(v);
 					}
 				}
 				const contItem = grid.find(it => it?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token);
@@ -445,7 +522,7 @@ export async function channelUploads(channelId, { maxResults = 25 } = {}) {
 			}
 		}
 	}
-	return { ids, calls };
+	return { ids, items, calls };
 }
 
 /**

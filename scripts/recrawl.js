@@ -171,24 +171,44 @@ const translated = url => /^\/(en|uk|kk)(\/|$)/.test(new URL(url).pathname);
  * прямым способом: читается ровно то, что сайт показывает поисковику. Разъехаться
  * с картой такой список не может по устройству.
  */
-async function sitemapUrls(origin) {
-	const response = await fetch(`${origin}/sitemap.xml`);
+async function readUrlset(xmlUrl) {
+	const response = await fetch(xmlUrl);
 
 	if (!response.ok) {
-		throw new Error(`карта сайта не отдалась: HTTP ${response.status}`);
+		throw new Error(`карта сайта не отдалась (${xmlUrl}): HTTP ${response.status}`);
 	}
 
-	const xml = await response.text();
+	return response.text();
+}
+
+async function sitemapUrls(origin) {
+	const rootXml = await readUrlset(`${origin}/sitemap.xml`);
+	const xmls = [];
+
+	if (rootXml.includes('<sitemapindex')) {
+		for (const block of rootXml.matchAll(/<sitemap>([\s\S]*?)<\/sitemap>/g)) {
+			const child = /<loc>([^<]+)<\/loc>/.exec(block[1])?.[1];
+
+			if (child) {
+				xmls.push(await readUrlset(unescapeHtml(child)));
+			}
+		}
+	} else {
+		xmls.push(rootXml);
+	}
+
 	const found = [];
 
-	for (const block of xml.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
-		const url = /<loc>([^<]+)<\/loc>/.exec(block[1])?.[1];
+	for (const xml of xmls) {
+		for (const block of xml.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
+			const url = /<loc>([^<]+)<\/loc>/.exec(block[1])?.[1];
 
-		if (url && !translated(url)) {
-			found.push({
-				url: unescapeHtml(url),
-				stamp: /<lastmod>([^<]+)<\/lastmod>/.exec(block[1])?.[1] ?? '',
-			});
+			if (url && !translated(url)) {
+				found.push({
+					url: unescapeHtml(url),
+					stamp: /<lastmod>([^<]+)<\/lastmod>/.exec(block[1])?.[1] ?? '',
+				});
+			}
 		}
 	}
 

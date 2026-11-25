@@ -62,8 +62,8 @@ export const TAIL_BYTES = 8192;
  */
 export const CHUNK_BYTES = 8192;
 
-const AUDIO = /\.(mp3|wav|ogg|oga|opus|m4a|aac|flac|wma)$/i;
-const VIDEO = /\.(mp4|webm|mov|avi|mkv|m4v|wmv|flv)$/i;
+const AUDIO = /\.(mp3|mp2|wav|ogg|oga|opus|m4a|m4b|aac|flac|wma)$/i;
+const VIDEO = /\.(mp4|webm|mov|avi|mkv|m4v|3gp|ogv|wmv|flv)$/i;
 
 /** Звук это, видео или вовсе картинка. Пустая строка — не медиа. */
 export function mediaKind(name) {
@@ -704,17 +704,21 @@ export function probeDuration(name, head, size) {
 
 	switch (extensionOf(name)) {
 		case 'mp3':
+		case 'mp2':
 			return mp3Duration(head, size);
 		case 'mp4':
 		case 'm4a':
+		case 'm4b':
 		case 'm4v':
 		case 'mov':
+		case '3gp':
 		case 'aac':
 			// Имя говорит «коробка», а внутри бывает голый поток кадров:
 			// решает содержимое, а не расширение
 			return wrap(adtsDuration(head, size)) ?? isoDuration(head, size);
 		case 'ogg':
 		case 'oga':
+		case 'ogv':
 		case 'opus':
 			return { needTail: true };
 		case 'wav':
@@ -751,7 +755,7 @@ export function probeDurationTail(name, head, tail) {
 
 	const extension = extensionOf(name);
 
-	if (extension !== 'ogg' && extension !== 'oga' && extension !== 'opus') {
+	if (extension !== 'ogg' && extension !== 'oga' && extension !== 'ogv' && extension !== 'opus') {
 		const seconds = isoChunkDuration(tail);
 
 		return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
@@ -788,7 +792,8 @@ export function probeDurationAt(name, chunk, size, from) {
 		return null;
 	}
 
-	const seconds = extensionOf(name) === 'mp3'
+	const ext = extensionOf(name);
+	const seconds = ext === 'mp3' || ext === 'mp2'
 		? mp3Duration(chunk, size, from)?.seconds
 		: isoChunkDuration(chunk);
 
@@ -830,12 +835,16 @@ export function plainName(name) {
  *
  * @param {object} archive открытый архив (см. openRemoteZip в src/zip.js)
  * @returns {Promise<{total: number, files: number, average: number|null,
- *          longest: number|null}>} total — сколько медиафайлов в паке,
- *          files — сколько удалось измерить
+ *          longest: number|null, byFile: Map<string, number>}>} total — сколько
+ *          медиафайлов в паке, files — сколько удалось измерить, byFile —
+ *          длительность каждого измеренного файла по его имени (в нижнем регистре,
+ *          и с папкой, и без неё) для расчёта полной длительности пака
+ *          (см. measurePackDuration в src/pack-duration.js)
  */
 export async function measureMedia(archive) {
 	const media = archive.entries.filter(entry => mediaKind(plainName(entry.name)));
-	const empty = { total: media.length, files: 0, average: null, longest: null };
+	const byFile = new Map();
+	const empty = { total: media.length, files: 0, average: null, longest: null, byFile };
 
 	if (media.length === 0) {
 		return empty;
@@ -843,6 +852,19 @@ export async function measureMedia(archive) {
 
 	const seconds = [];
 	const sizeOf = entry => entry.size || entry.compressedSize;
+	const record = (entry, value) => {
+		seconds.push(value);
+		const clean = plainName(entry.name).replace(/\\/g, '/').toLowerCase();
+
+		if (clean) {
+			byFile.set(clean, value);
+			const basename = clean.split('/').pop();
+
+			if (basename && !byFile.has(basename)) {
+				byFile.set(basename, value);
+			}
+		}
+	};
 
 	// Кому начала не хватило: у MP3 звук лежит за тегом ID3, у MP4 оглавление —
 	// за содержимым. Оба назвали точное место, так что это один короткий кусок
@@ -863,7 +885,7 @@ export async function measureMedia(archive) {
 		const probe = probeDuration(name, head.data, sizeOf(entry));
 
 		if (probe?.seconds) {
-			seconds.push(probe.seconds);
+			record(entry, probe.seconds);
 		} else if (probe?.needTail) {
 			tailed.push({ entry, dataStart: head.dataStart, head: head.data });
 		} else if (probe?.needAt) {
@@ -878,7 +900,7 @@ export async function measureMedia(archive) {
 			const value = probeDurationTail(plainName(item.entry.name), item.head, tails.get(item.entry));
 
 			if (value) {
-				seconds.push(value);
+				record(item.entry, value);
 			}
 		}
 	}
@@ -891,7 +913,7 @@ export async function measureMedia(archive) {
 				sizeOf(item.entry), item.from);
 
 			if (value) {
-				seconds.push(value);
+				record(item.entry, value);
 			}
 		}
 	}
@@ -905,5 +927,6 @@ export async function measureMedia(archive) {
 		files: seconds.length,
 		average: seconds.reduce((sum, value) => sum + value, 0) / seconds.length,
 		longest: Math.max(...seconds),
+		byFile,
 	};
 }

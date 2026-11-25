@@ -115,6 +115,33 @@ export const MARKUP = [
 		at: 'summary_at',
 		columns: ['summary', 'summary_at', 'summary_model', 'audience_from', 'audience_to', 'audience_male', 'audience_at'],
 	},
+	{
+		name: 'длительность медиа',
+		at: 'media_at',
+		columns: ['media_avg', 'media_max', 'media_total', 'media_files', 'media_at'],
+	},
+];
+
+/**
+ * Отдельные таблицы результатов обхода, привязанные к packages.id через package_id
+ * и помеченные своим временем замера: длительность пака (pack_duration) и форматы
+ * медиа (pack_formats). Сливаются тем же правилом, что и MARKUP — по source_key
+ * через packages, побеждает более свежая отметка времени (см. carryMarkup
+ * в scripts/state/carry.js).
+ */
+export const MARKUP_TABLES = [
+	{
+		name: 'длительность пака',
+		table: 'pack_duration',
+		at: 'measured_at',
+		columns: ['duration', 'measured_at'],
+	},
+	{
+		name: 'форматы медиа',
+		table: 'pack_formats',
+		at: 'checked_at',
+		columns: ['formats', 'checked_at'],
+	},
 ];
 
 /**

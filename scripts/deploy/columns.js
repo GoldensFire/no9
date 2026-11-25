@@ -73,6 +73,11 @@ const COLUMNS = [
 	// Сколько кадров с признаками SIGame нашлось на записи: защищает knownChannels()
 	// от загрязнения ложными probe-каналами (src/twitch/store.js)
 	['twitch_vods', 'signs', 'INTEGER'],
+	// Площадки автора помимо Discord и Steam: показываются на странице автора
+	// и уходят в sameAs разметки Person (cf/src/library/about.js, src/meta/landing.js)
+	['author_texts', 'twitch', "TEXT NOT NULL DEFAULT ''"],
+	['author_texts', 'youtube', "TEXT NOT NULL DEFAULT ''"],
+	['author_texts', 'vk', "TEXT NOT NULL DEFAULT ''"],
 ];
 
 /**

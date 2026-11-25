@@ -29,7 +29,9 @@
     "recrawl:dry": "node --no-warnings scripts/recrawl.js --dry",
     "deploy:logos": "node --no-warnings scripts/deploy-logos.js",
     "twitch": "node --no-warnings scripts/twitch.js",
-    "youtube": "node --no-warnings scripts/youtube.js"
+    "youtube": "node --no-warnings scripts/youtube.js",
+    "youtube:local": "node --no-warnings scripts/youtube.js --local --backfill",
+    "youtube:hybrid": "node --no-warnings scripts/youtube.js --hybrid --backfill"
   },
   "engines": {
     "node": ">=22"

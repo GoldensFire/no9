@@ -50,10 +50,10 @@ const dbPath = path.join(root, 'data', 'sibase.db');
 const outPath = path.join(root, 'cf', 'data');
 
 /**
- * Порядок важен: stats, pack_formats и pack_authors ссылаются на packages,
+ * Порядок важен: stats, pack_formats, pack_duration и pack_authors ссылаются на packages,
  * поэтому создаются позже него, а удаляются раньше.
  */
-const TABLES = ['packages', 'stats', 'pack_formats', 'pack_authors'];
+const TABLES = ['packages', 'stats', 'pack_formats', 'pack_duration', 'pack_authors'];
 
 /**
  * Насколько длинным можно отпускать один запрос, байты. Считаем по объёму,
@@ -417,6 +417,7 @@ function main() {
 			packages: new Set(db.prepare('SELECT id FROM packages').all().map(row => row.id)),
 			stats: new Set(db.prepare('SELECT package_id FROM stats').all().map(row => row.package_id)),
 			pack_formats: new Set(db.prepare('SELECT package_id FROM pack_formats').all().map(row => row.package_id)),
+			pack_duration: new Set(db.prepare('SELECT package_id FROM pack_duration').all().map(row => row.package_id)),
 			pack_authors: new Set(db.prepare('SELECT DISTINCT package_id FROM pack_authors').all().map(row => row.package_id)),
 		};
 
@@ -431,11 +432,16 @@ function main() {
 		}
 	}
 
-	// ————— packages, stats и pack_formats —————
+	// ————— packages, stats, pack_formats и pack_duration —————
 
 	// Какие колонки в отпечаток не входят — и почему их две, — сказано там же,
 	// где считается сам отпечаток (см. SKIP в scripts/deploy/rowhash.js).
-	for (const [table, key] of [['packages', 'id'], ['stats', 'package_id'], ['pack_formats', 'package_id']]) {
+	for (const [table, key] of [
+		['packages', 'id'],
+		['stats', 'package_id'],
+		['pack_formats', 'package_id'],
+		['pack_duration', 'package_id'],
+	]) {
 		const skip = SKIP[table] ?? [];
 
 		if (whole) {

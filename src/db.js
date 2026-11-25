@@ -158,6 +158,20 @@ CREATE TABLE IF NOT EXISTS pack_formats (
 	checked_at INTEGER NOT NULL
 );
 
+/* Полная длительность пака, целые секунды (см. src/pack-duration.js).
+   Считается по content.xml и заголовкам аудио/видео в одном проходе
+   с измерением медиа (см. fetchDurations в src/indexer/backfill.js).
+   Своей таблицей, а не колонкой packages: та в D1 упёрлась в сто столбцов
+   ответа (см. «Дозаливка колонок» ниже). У пака без вопросов или контента
+   строка лежит с нулём, чтобы не вставать в очередь каждую ночь.
+   measured_at — когда считали: перезалитый позже пак пересчитается сам.
+   Уезжает наверх вместе с packages (см. TABLES в scripts/export-d1.js) */
+CREATE TABLE IF NOT EXISTS pack_duration (
+	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
+	duration INTEGER NOT NULL,
+	measured_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pack_prints (
 	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
 	prints BLOB NOT NULL,

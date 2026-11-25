@@ -22,7 +22,7 @@ const RPM_GAP_MS = 4500;
 const OVERLOAD_BACKOFF_MS = [5_000, 15_000, 30_000, 45_000];
 const OVERLOAD_COOLDOWN_MS = 5 * 60_000;
 const MAX_QUOTA_WAIT_MS = 30_000;
-const REQUEST_TIMEOUT_MS = 75_000;
+const REQUEST_TIMEOUT_MS = 40_000;
 const MAX_CONSECUTIVE_403 = 5;
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
@@ -84,9 +84,10 @@ export class BadSliceError extends Error {
 }
 
 export class QuotaExhaustedError extends Error {
-	constructor(message) {
+	constructor(message, retryAfterMs = null) {
 		super(message);
 		this.name = 'QuotaExhaustedError';
+		this.retryAfterMs = retryAfterMs;
 	}
 }
 
@@ -101,6 +102,11 @@ function retryDelayFrom(error) {
 	for (const detail of error?.details ?? []) {
 		const m = /^(\d+(?:\.\d+)?)s$/.exec(String(detail.retryDelay ?? ''));
 		if (m) return Math.round(Number(m[1]) * 1000);
+	}
+	const msg = String(error?.message || '');
+	const hm = /retry\s+in\s+(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i.exec(msg);
+	if (hm) {
+		return Math.round((Number(hm[1] || 0) * 3600 + Number(hm[2] || 0) * 60 + Number(hm[3] || 0)) * 1000);
 	}
 	return null;
 }
@@ -285,7 +291,7 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 				// 429 — квота
 				if (status === 429) {
 					if (err.quota?.youtubeLimit) {
-						throw new QuotaExhaustedError(`суточный лимит YouTube-видео проекта Gemini: ${err.message}`);
+						throw new QuotaExhaustedError(`суточный лимит YouTube-видео проекта Gemini: ${err.message}`, err.retryAfterMs);
 					}
 					if (err.quota?.perDay || rpmTry >= 2) {
 						exhaustedModels.add(model);
@@ -296,7 +302,7 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 							rpmTry = 0;
 							continue;
 						}
-						throw new QuotaExhaustedError(`суточный лимит Gemini исчерпан: ${err.message}`);
+						throw new QuotaExhaustedError(`суточный лимит Gemini исчерпан: ${err.message}`, err.retryAfterMs);
 					}
 					rpmTry++;
 					const wait = Math.min(err.retryAfterMs ?? 15_000 * rpmTry, MAX_QUOTA_WAIT_MS);
@@ -331,6 +337,10 @@ export function createYoutubeGemini({ apiKey = config.youtubeGeminiKey || config
 	return {
 		analyzeClips,
 		activeModel: () => currentModel() || models[0],
+		resetExhausted: () => {
+			exhaustedModels.clear();
+			cooldownUntil.clear();
+		},
 		stats: () => ({ calls: totalCalls, tokensIn: totalTokensIn }),
 	};
 }

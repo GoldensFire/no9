@@ -141,6 +141,20 @@ function printSummary() {
 	const withSubject = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE franchise_top IS NOT NULL`).get().c;
 	// Спецвопросы считаются при разборе: у паков, разобранных раньше, их число неизвестно
 	const specials = db.prepare(`SELECT COUNT(*) AS c FROM packages WHERE status = 'ok' AND special_count IS NULL`).get().c;
+	// Полная длительность пака: сколько живых паков уже посчитаны и сколько ждёт --durations
+	const withDuration = db.prepare(`
+		SELECT COUNT(*) AS c FROM packages p
+		JOIN pack_duration d ON d.package_id = p.id
+		WHERE p.status = 'ok' AND d.measured_at >= COALESCE(p.indexed_at, 0)
+	`).get().c;
+	const durationsPending = db.prepare(`
+		SELECT COUNT(*) AS c FROM packages p
+		LEFT JOIN pack_duration d ON d.package_id = p.id
+		WHERE p.status = 'ok' AND (
+			p.media_at IS NULL OR p.media_at < COALESCE(p.indexed_at, 0)
+			OR d.package_id IS NULL OR d.measured_at < COALESCE(p.indexed_at, 0)
+		)
+	`).get().c;
 	const levels = db.prepare('SELECT level, COUNT(*) AS c FROM stats WHERE level IS NOT NULL GROUP BY level ORDER BY level DESC').all();
 	const topics = db.prepare('SELECT primary_topic, COUNT(*) AS c FROM packages WHERE primary_topic IS NOT NULL GROUP BY primary_topic ORDER BY c DESC').all();
 	const byModel = db.prepare(`
@@ -157,6 +171,8 @@ function printSummary() {
 	console.log(`Есть статистика: ${withStats}. С логотипом: ${withLogo}`
 		+ `${noThumb > 0 ? ` (показать нечем у ${noThumb} — их доделает шаг «логотипы»)` : ''}`
 		+ `. С описанием: ${described}. С предметом: ${withSubject}.`);
+	console.log(`Длительность пака: посчитана у ${withDuration} из ${parsed}`
+		+ `${durationsPending > 0 ? ` (в очереди --durations: ${durationsPending})` : ''}.`);
 
 	if (specials > 0) {
 		console.log(`Спецвопросы не посчитаны у ${specials} паков: они разобраны раньше, чем их научились считать.`);

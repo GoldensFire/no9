@@ -59,6 +59,27 @@ export async function knownYoutubeChannels() {
 	return await askRows('SELECT channel_id, title, handle, twitch_login, source, sigame_videos, last_checked_at FROM youtube_channels');
 }
 
+/**
+ * Отдача каждого YouTube-канала: сколько его видео уже просмотрено и на скольких
+ * нашлись паки из нашей базы. Нужно очереди приоритетов в discover.js, чтобы
+ * «сухие» каналы с авторскими шоу (0/11) не сжигали квоту впереди паковых каналов (14/19).
+ *
+ * @returns {Promise<Map<string, { scanned: number, withPacks: number }>>}
+ */
+export async function channelYieldStats() {
+	const rows = await askRows(`SELECT y.channel_id,
+		COUNT(*) AS scanned,
+		COUNT(DISTINCT CASE WHEN ps.vod_id IS NOT NULL THEN y.video_id END) AS with_packs
+		FROM youtube_videos y
+		LEFT JOIN pack_streams ps ON ps.vod_id = 'yt:' || y.video_id
+		WHERE y.status = 'done'
+		GROUP BY y.channel_id`);
+	return new Map(rows.map(r => [String(r.channel_id), {
+		scanned: Number(r.scanned || 0),
+		withPacks: Number(r.with_packs || 0),
+	}]));
+}
+
 /** Подтверждённые Twitch-каналы (signs >= 5 или есть в pack_streams) для моста socialMedias. */
 export async function confirmedTwitchLogins() {
 	const rows = await askRows(`SELECT DISTINCT LOWER(channel) AS login FROM twitch_vods
@@ -78,6 +99,22 @@ export async function getKvTime(key) {
 
 export async function setKvTime(key, ts = Date.now()) {
 	await askRows(`INSERT INTO twitch_kv (key, value, expires_at) VALUES (${str(key)}, ${str(ts)}, NULL)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`);
+}
+
+/** Прочитать/сохранить небольшой JSON в twitch_kv (например, кэш проверенных логинов моста). */
+export async function getKvJson(key, fallback = null) {
+	const [row] = await askRows(`SELECT value FROM twitch_kv WHERE key = ${str(key)}`);
+	if (!row?.value) return fallback;
+	try {
+		return JSON.parse(String(row.value));
+	} catch {
+		return fallback;
+	}
+}
+
+export async function setKvJson(key, value) {
+	await askRows(`INSERT INTO twitch_kv (key, value, expires_at) VALUES (${str(key)}, ${str(JSON.stringify(value))}, NULL)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`);
 }
 

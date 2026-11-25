@@ -188,9 +188,9 @@ export async function scanYoutubeVideo(video, ctx) {
 			const res = await ctx.gemini.analyzeClips(video.id, batch);
 			applyResult(batch, res);
 
-			// Ранний выход на шуме: батчи #0 (~8%, ~45%) и #1 (~25%, ~75%) оба без SIGame
-			if (i === 1 && succeeded >= 2 && signs === 0) {
-				ctx.log?.(`  ранний выход на шуме (2 батча, is_sigame=false)`);
+			// Ранний выход на шуме: батчи #0 (10%, 50%, 86%) и #1 (28%, 68%, 94%) оба без SIGame
+			if (i === 1 && batches.length > 2 && succeeded >= 2 && signs === 0) {
+				ctx.log?.(`  ранний выход на шуме (2 батча, 6 окон, is_sigame=false)`);
 				break;
 			}
 		} catch (err) {
@@ -239,13 +239,14 @@ export async function scanYoutubeVideo(video, ctx) {
 		if (near2.length) {
 			const anchors = nearAnchors(near2, hits);
 			if (anchors.length) {
-				extraBatches = planDrillDown(video, anchors, scannedClips, { maxClips: near2.length * 2 });
+				// 3 среза = ровно 1 дополнительный батч при BATCH_SIZE=3 (достаточно для 1–2 near-паков)
+				extraBatches = planDrillDown(video, anchors, scannedClips, { maxClips: 3 });
 				drillReason = `near ×2 (${near2.map(n => `#${n.pack.id}`).join(', ')})`;
 			}
 		} else if (verdict.packs.length === 0 && signs >= 2 && seenThemeTexts.size < 6) {
-			const anchors = gapAnchors(Math.floor(video.length || 0), scannedClips, 2);
+			const anchors = gapAnchors(Math.floor(video.length || 0), scannedClips, 3);
 			if (anchors.length) {
-				extraBatches = planDrillDown(video, anchors, scannedClips, { maxClips: 2, offsets: [0, -180, 180] });
+				extraBatches = planDrillDown(video, anchors, scannedClips, { maxClips: 3, offsets: [0, -180, 180] });
 				drillReason = `мало тем (${seenThemeTexts.size})`;
 			}
 		}

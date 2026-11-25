@@ -12,14 +12,18 @@ import { openRemoteZip } from '../zip.js';
 import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
+import { measurePackDuration } from '../pack-duration.js';
 import { measureFormats } from '../media-formats.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { force, jobs, reprints } from './options.js';
 import { buryDeadLink, drain, retryNetwork, withFreshUrl } from './pipeline.js';
-import { say } from './progress.js';
-import { queueNote, targetSql } from './queue.js';
+import { formatSpan, say } from './progress.js';
+import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
 import { isChosen } from './steps.js';
-import { storeDurations, storeFormats, storePrints, storeRounds, updateHyx, updateSpecials } from './store.js';
+import {
+	storeDurations, storeFormats, storePackDuration, storePrints, storeRounds,
+	updateHyx, updateSpecials,
+} from './store.js';
 
 /**
  * Досчитывает отпечатки вопросов у паков, разобранных до того, как их научились
@@ -221,12 +225,18 @@ export async function fetchDurations() {
 	const target = targetSql();
 	const missing = force
 		? ''
-		: ' AND (p.media_at IS NULL OR p.media_at < COALESCE(p.indexed_at, 0))';
+		: ' AND (p.media_at IS NULL OR p.media_at < COALESCE(p.indexed_at, 0)'
+			+ ' OR d.package_id IS NULL OR d.measured_at < COALESCE(p.indexed_at, 0))';
 
+	// Сначала свежие: очередь на домерку полной длительности у старой базы
+	// тянется на несколько ночей, и первые страницы выдачи должны получить
+	// длительность раньше архивных паков (см. NEWEST_FIRST в src/indexer/queue.js)
 	const pending = db.prepare(`
-		SELECT p.id, p.url, p.file_name, p.source_key, p.name FROM packages p
+		SELECT p.id, p.url, p.file_name, p.source_key, p.name, p.media_at, p.indexed_at
+		FROM packages p
+		LEFT JOIN pack_duration d ON d.package_id = p.id
 		WHERE p.status = 'ok'${missing}${target.where}
-		ORDER BY p.id
+		ORDER BY ${NEWEST_FIRST}
 	`);
 
 	const params = target.params;
@@ -247,17 +257,49 @@ export async function fetchDurations() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const media = await retryNetwork(() => withFreshUrl(row, async url => measureMedia(await openRemoteZip(url))));
+				const { media, packDuration } = await retryNetwork(() => withFreshUrl(row, async url => {
+					const archive = await openRemoteZip(url);
+					const entry = archive.find('content.xml');
+					const xml = entry ? await archive.read(entry) : null;
+					const media = await measureMedia(archive);
+					// Если content.xml отсутствует в архиве, пишем 0, чтобы пак не
+					// возвращался в очередь каждую ночь бесконечно (см. pack_duration в src/db.js)
+					const packDuration = xml ? measurePackDuration(xml, media) : 0;
 
-				storeDurations(row.id, media);
+					return { media, packDuration };
+				}));
+
+				// Строку packages трогаем только когда её собственные media_* устарели
+				// или не мерились: иначе домерка полной длительности на уже измеренных
+				// паках сдвигала бы media_at и гнала бы в D1 всю таблицу packages заново
+				const needMedia = force || !row.media_at || row.media_at < (row.indexed_at ?? 0);
+
+				if (needMedia) {
+					storeDurations(row.id, media);
+				}
+
+				storePackDuration(row.id, packDuration);
+
 				ok++;
 
 				if (media.files > 0) {
 					withMedia++;
 					files += media.files;
-					say('durations', `${bar.label()} ${row.name ?? row.file_name}: `
-						+ `${media.files} из ${media.total} файлов, в среднем ${Math.round(media.average)} с, `
-						+ `самый длинный ${Math.round(media.longest)} с`);
+				}
+
+				if (media.files > 0 || packDuration > 0) {
+					const parts = [];
+
+					if (packDuration > 0) {
+						parts.push(`пак ${formatSpan(packDuration * 1000)}`);
+					}
+
+					if (media.files > 0) {
+						parts.push(`${media.files} из ${media.total} файлов, в среднем ${Math.round(media.average)} с, `
+							+ `самый длинный ${Math.round(media.longest)} с`);
+					}
+
+					say('durations', `${bar.label()} ${row.name ?? row.file_name}: ${parts.join('; ')}`);
 				}
 			} catch (error) {
 				if (buryDeadLink(row, error)) {
