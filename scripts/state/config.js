@@ -134,7 +134,7 @@ export const MARKUP_TABLES = [
 		name: 'длительность пака',
 		table: 'pack_duration',
 		at: 'measured_at',
-		columns: ['duration', 'measured_at'],
+		columns: ['duration', 'breakdown', 'measured_at'],
 	},
 	{
 		name: 'форматы медиа',

@@ -18,6 +18,8 @@ import { SteamGoneError } from '../steam/session.js';
 import { isObsceneName } from '../obscene.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { parseContentXml } from '../siq.js';
+import { mediaKind, plainName } from '../duration.js';
+import { measurePackDurationDetail } from '../pack-duration.js';
 import { ensurePreview, ensureThumb, hasPreview, isAvif } from '../thumbs.js';
 import { thumbName } from '../logo.js';
 import { force, jobs, refit, reparse, retryFailed } from './options.js';
@@ -25,8 +27,9 @@ import { buryDeadLink, drain, isSteamPack, retryNetwork, withPackArchive } from 
 import { say } from './progress.js';
 import { NEWEST_FIRST, queueNote, targetSql } from './queue.js';
 import {
-	clearRecheck, markPackSteamState, resetSteamTopics, storePrints, updateFailed,
-	updateFileName, updateJunk, updateLogo, updatePackSteamManifest, updateParsed,
+	clearRecheck, markPackSteamState, resetSteamTopics, storeDurations, storePackDuration,
+	storePrints, updateFailed, updateFileName, updateJunk, updateLogo,
+	updatePackSteamManifest, updateParsed,
 } from './store.js';
 
 function themeNamesOf(rounds) {
@@ -263,7 +266,8 @@ export async function parsePackages() {
 					// по нему отпечаток вопроса отличает «тот же файл» от «то же
 					// имя» (см. sameWeight в src/plagiarism.js). Оглавление уже
 					// прочитано, так что стоит это ничего
-					const parsed = parseContentXml(await archive.read(entry), archive.mediaSizes());
+					const xmlBuf = await archive.read(entry);
+					const parsed = parseContentXml(xmlBuf, archive.mediaSizes());
 
 					if (!parsed.name) {
 						throw new Error('в паке не указано имя');
@@ -284,10 +288,21 @@ export async function parsePackages() {
 						? null
 						: hyxFiles(archive.entries.map(item => item.name), parsed.authors);
 
-					return { parsed, logo, hyx, totalSize: archive.totalSize, steamMeta: archive.steamMeta ?? null, tooSmall };
+					// Если в паке нет аудио/видео, длительность считается прямо здесь по уже
+					// прочитанному content.xml — открывать архив повторно на шаге --durations
+					// больше не придётся (см. pack-duration-analysis.md, шаг 1.3)
+					const hasMedia = archive.entries.some(item => mediaKind(plainName(item.name)));
+					const zeroMediaDuration = !tooSmall && !hasMedia
+						? measurePackDurationDetail(xmlBuf, null)
+						: null;
+
+					return {
+						parsed, logo, hyx, zeroMediaDuration,
+						totalSize: archive.totalSize, steamMeta: archive.steamMeta ?? null, tooSmall,
+					};
 				}));
 
-				const { parsed, logo, hyx, totalSize, steamMeta, tooSmall } = result;
+				const { parsed, logo, hyx, zeroMediaDuration, totalSize, steamMeta, tooSmall } = result;
 
 				if (steamMeta) {
 					updatePackSteamManifest.run(steamMeta.sha1 ?? null, steamMeta.fileSize ?? totalSize, row.id);
@@ -361,6 +376,13 @@ export async function parsePackages() {
 				// второй раз качать content.xml ради того, что уже прочитано,
 				// незачем (см. fetchPrints в src/indexer/backfill.js)
 				storePrints(row.id, parsed.questions);
+
+				// У пака без аудио/видео длительность уже посчитана выше — записываем
+				// сразу, чтобы --durations не открывал этот архив повторно
+				if (zeroMediaDuration) {
+					storeDurations(row.id, { total: 0, files: 0, average: null, longest: null });
+					storePackDuration(row.id, zeroMediaDuration.duration, zeroMediaDuration.breakdown);
+				}
 
 				ok++;
 

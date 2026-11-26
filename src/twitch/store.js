@@ -271,6 +271,18 @@ export async function notifyStreamOwners(video, keys) {
 			JOIN user_vk v ON v.vk_id = a.canon_account
 			WHERE ${PACK_KEY_SQL} = ${str(key)}
 			UNION
+			SELECT s.user_id AS id
+			FROM packages p INDEXED BY ix_packages_pack_key
+			JOIN pack_authors a ON a.package_id = p.id
+			JOIN user_steam s ON s.steam_id = a.canon_steam
+			WHERE ${PACK_KEY_SQL} = ${str(key)}
+			UNION
+			SELECT u.id AS id
+			FROM packages p INDEXED BY ix_packages_pack_key
+			JOIN pack_authors a ON a.package_id = p.id
+			JOIN users u INDEXED BY ix_users_steam ON u.steam_id = a.canon_steam
+			WHERE ${PACK_KEY_SQL} = ${str(key)}
+			UNION
 			SELECT b.user_id AS id
 			FROM packages p INDEXED BY ix_packages_pack_key
 			JOIN pack_authors a ON a.package_id = p.id

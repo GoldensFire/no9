@@ -11,7 +11,7 @@ import { db } from '../db.js';
 import { parseContentXml } from '../siq.js';
 import { PRINTS_VERSION } from '../plagiarism.js';
 import { measureMedia } from '../duration.js';
-import { measurePackDuration } from '../pack-duration.js';
+import { measurePackDurationDetail } from '../pack-duration.js';
 import { measureFormats } from '../media-formats.js';
 import { hyxDetail, hyxFiles } from '../hyx.js';
 import { force, jobs, reprints } from './options.js';
@@ -224,17 +224,19 @@ export async function fetchDurations() {
 	const missing = force
 		? ''
 		: ' AND (p.media_at IS NULL OR p.media_at < COALESCE(p.indexed_at, 0)'
-			+ ' OR d.package_id IS NULL OR d.measured_at < COALESCE(p.indexed_at, 0))';
+			+ ' OR d.package_id IS NULL OR d.measured_at < COALESCE(p.indexed_at, 0)'
+			+ ' OR d.breakdown IS NULL)';
 
-	// Сначала свежие: очередь на домерку полной длительности у старой базы
-	// тянется на несколько ночей, и первые страницы выдачи должны получить
-	// длительность раньше архивных паков (см. NEWEST_FIRST в src/indexer/queue.js)
+	// Сначала совсем не меренные (и устаревшие), внутри — самые свежие; уже
+	// измеренные раньше без breakdown добираются следом, не тормозя очередь
+	// новых паков (см. NEWEST_FIRST в src/indexer/queue.js)
 	const pending = db.prepare(`
 		SELECT p.id, p.url, p.file_name, p.source_key, p.name, p.media_at, p.indexed_at
 		FROM packages p
 		LEFT JOIN pack_duration d ON d.package_id = p.id
 		WHERE p.status = 'ok'${missing}${target.where}
-		ORDER BY ${NEWEST_FIRST}
+		ORDER BY CASE WHEN d.package_id IS NULL OR d.measured_at < COALESCE(p.indexed_at, 0) THEN 0 ELSE 1 END,
+			${NEWEST_FIRST}
 	`);
 
 	const params = target.params;
@@ -255,16 +257,19 @@ export async function fetchDurations() {
 		take: () => pending.all(...params),
 		work: async (row, bar) => {
 			try {
-				const { media, packDuration } = await retryNetwork(() => withPackArchive(row, async archive => {
+				const { media, detail } = await retryNetwork(() => withPackArchive(row, async archive => {
 					const entry = archive.find('content.xml');
 					const xml = entry ? await archive.read(entry) : null;
 					const media = await measureMedia(archive);
 					// Если content.xml отсутствует в архиве, пишем 0, чтобы пак не
 					// возвращался в очередь каждую ночь бесконечно (см. pack_duration в src/db.js)
-					const packDuration = xml ? measurePackDuration(xml, media) : 0;
+					const detail = xml
+						? measurePackDurationDetail(xml, media)
+						: { duration: 0, breakdown: null };
 
-					return { media, packDuration };
+					return { media, detail };
 				}));
+				const packDuration = detail.duration;
 
 				// Строку packages трогаем только когда её собственные media_* устарели
 				// или не мерились: иначе домерка полной длительности на уже измеренных
@@ -275,7 +280,7 @@ export async function fetchDurations() {
 					storeDurations(row.id, media);
 				}
 
-				storePackDuration(row.id, packDuration);
+				storePackDuration(row.id, packDuration, detail.breakdown);
 
 				ok++;
 

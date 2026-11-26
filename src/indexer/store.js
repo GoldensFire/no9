@@ -382,13 +382,20 @@ export function storeDurations(packageId, media) {
 }
 
 const updatePackDuration = db.prepare(`
-	INSERT INTO pack_duration (package_id, duration, measured_at) VALUES (?, ?, ?)
-	ON CONFLICT (package_id) DO UPDATE SET duration = excluded.duration, measured_at = excluded.measured_at
+	INSERT INTO pack_duration (package_id, duration, breakdown, measured_at) VALUES (?, ?, ?, ?)
+	ON CONFLICT (package_id) DO UPDATE SET
+		duration = excluded.duration,
+		breakdown = excluded.breakdown,
+		measured_at = excluded.measured_at
 `);
 
-/** Полная длительность пака в секундах (см. measurePackDuration в src/pack-duration.js). */
-export function storePackDuration(packageId, seconds) {
-	updatePackDuration.run(packageId, seconds, Date.now());
+/**
+ * Чистая длительность пака в секундах и сырая разбивка по компонентам
+ * (см. measurePackDurationDetail в src/pack-duration.js).
+ */
+export function storePackDuration(packageId, seconds, breakdown = null) {
+	const json = breakdown ? JSON.stringify(breakdown) : null;
+	updatePackDuration.run(packageId, seconds, json, Date.now());
 }
 
 const updateFormats = db.prepare(`

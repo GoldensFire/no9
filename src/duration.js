@@ -835,16 +835,18 @@ export function plainName(name) {
  *
  * @param {object} archive открытый архив (см. openRemoteZip в src/zip.js)
  * @returns {Promise<{total: number, files: number, average: number|null,
- *          longest: number|null, byFile: Map<string, number>}>} total — сколько
- *          медиафайлов в паке, files — сколько удалось измерить, byFile —
- *          длительность каждого измеренного файла по его имени (в нижнем регистре,
- *          и с папкой, и без неё) для расчёта полной длительности пака
+ *          median: number|null, longest: number|null, byFile: Map<string, number>}>}
+ *          total — сколько медиафайлов в паке, files — сколько удалось измерить,
+ *          median — медианная длина измеренных файлов (устойчивый fallback для
+ *          неизмеренных файлов в measurePackDuration), byFile — длительность
+ *          каждого измеренного файла по его имени (в нижнем регистре, и с папкой,
+ *          и без неё) для расчёта полной длительности пака
  *          (см. measurePackDuration в src/pack-duration.js)
  */
 export async function measureMedia(archive) {
 	const media = archive.entries.filter(entry => mediaKind(plainName(entry.name)));
 	const byFile = new Map();
-	const empty = { total: media.length, files: 0, average: null, longest: null, byFile };
+	const empty = { total: media.length, files: 0, average: null, median: null, longest: null, byFile };
 
 	if (media.length === 0) {
 		return empty;
@@ -922,11 +924,18 @@ export async function measureMedia(archive) {
 		return empty;
 	}
 
+	const sorted = [...seconds].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	const median = sorted.length % 2 === 1
+		? sorted[mid]
+		: (sorted[mid - 1] + sorted[mid]) / 2;
+
 	return {
 		total: media.length,
 		files: seconds.length,
 		average: seconds.reduce((sum, value) => sum + value, 0) / seconds.length,
-		longest: Math.max(...seconds),
+		median,
+		longest: sorted[sorted.length - 1],
 		byFile,
 	};
 }

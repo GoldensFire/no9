@@ -313,9 +313,10 @@ export function execute(file) {
  * даже не спрашивает, кто пришёл, — и проверить оценки с отметками нечем.
  * Файл переписывается каждой проверкой и в облако не уезжает никогда.
  *
- * Входов два, и каждый заводится сам по себе: заведён один — работает один,
- * и это не поломка. У ВК при этом секрета нет вовсе — в VK ID его заменяет
- * PKCE (см. cf/src/auth/vk.js), — поэтому от него нужен только номер приложения.
+ * Входов три (Discord, ВК и Steam), и каждый заводится сам по себе: заведён один —
+ * работает один, и это не поломка. У ВК при этом секрета нет вовсе — в VK ID его
+ * заменяет PKCE (см. cf/src/auth/vk.js), — поэтому от него нужен только номер
+ * приложения; у Steam нужен только ключ Web API для имени и аватара.
  */
 export function writeDevVars() {
 	const found = [
@@ -326,6 +327,8 @@ export function writeDevVars() {
 		['VK_GROUP_TOKEN', 'vk-group-token.txt'],
 		['VK_CALLBACK_CONFIRM', 'vk-callback-confirm.txt'],
 		['VK_CALLBACK_SECRET', 'vk-callback-secret.txt'],
+		// Вход через Steam OpenID 2.0 + профиль через Steam Web API (см. cf/src/auth/steam.js)
+		['STEAM_API_KEY', 'steam-api-key.txt'],
 	]
 		.map(([name, file]) => [name, readSecret(name, file)])
 		.filter(([, value]) => value);

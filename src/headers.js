@@ -102,11 +102,11 @@ const YOUTUBE_PLAYER = 'https://www.youtube-nocookie.com https://www.youtube.com
 
 /**
  * Откуда берутся значки людей. У Discord адрес складывается из номера учётной
- * записи и отпечатка картинки, у ВК приходит готовым (см. avatarUrl
- * в cf/src/auth/session.js), и хосты у ВК не один: значки лежат на sun*.userapi.com,
- * а запасной «нет фотографии» — на самом vk.com.
+ * записи и отпечатка картинки, у ВК и Steam приходит готовым (см. avatarUrl
+ * в cf/src/auth/avatar.js): у ВК — sun*.userapi.com и vk.com, у Steam —
+ * avatars.*.steamstatic.com.
  */
-const AVATARS = 'https://cdn.discordapp.com https://*.userapi.com https://*.vk.com';
+const AVATARS = 'https://cdn.discordapp.com https://*.userapi.com https://*.vk.com https://*.steamstatic.com';
 
 /**
  * Правило содержимого — вторая линия против XSS.

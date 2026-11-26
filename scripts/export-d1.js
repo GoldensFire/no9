@@ -520,8 +520,8 @@ function main() {
 	// человеком (см. mergeAuthors в src/indexer/authors.js). Без него топ авторов наверху
 	// сходится в одну строку с пустым именем — все canon_key там NULL
 	//
-	// Вместе с ним едет и номер страницы ВК: по нему сайт узнаёт автора в лицо,
-	// когда тот входит через ВК (см. cf/src/library/authorship.js).
+	// Вместе с ним едут номер страницы ВК и SteamID64: по ним сайт узнаёт автора
+	// в лицо, когда тот входит через ВК или Steam (см. cf/src/library/authorship.js).
 	//
 	// Колонки здесь перечислены поимённо, а не звёздочкой, — и новая колонка
 	// таблицы сама сюда не попадает. Добавлять её надо в трёх местах разом:
@@ -529,7 +529,7 @@ function main() {
 	// наверх не уедет ничего (строки не будут считаться изменившимися);
 	// пропустишь INSERT — уедут NULL. И то и другое расходится с домашней базой
 	// молча, потому что дома всё останется целым
-	const authorsQuery = 'SELECT package_id, author_key, author, canon_key, canon_name, canon_account'
+	const authorsQuery = 'SELECT package_id, author_key, author, canon_key, canon_name, canon_account, canon_steam'
 		+ ' FROM pack_authors ORDER BY package_id, author_key';
 
 	for (const row of db.prepare(authorsQuery).iterate()) {
@@ -544,7 +544,7 @@ function main() {
 	const redo = [];
 
 	for (const [packageId, list] of authorsOf) {
-		const hash = digest(list.map(row => `${row.author_key}${row.author}${row.canon_key}${row.canon_name}${row.canon_account}`).join(' '));
+		const hash = digest(list.map(row => `${row.author_key}${row.author}${row.canon_key}${row.canon_name}${row.canon_account}${row.canon_steam}`).join(' '));
 		remember.run('pack_authors', packageId, hash);
 
 		if (known.get(packageId) !== hash) {
@@ -559,9 +559,9 @@ function main() {
 
 		batched(
 			writer,
-			'INSERT OR REPLACE INTO pack_authors (package_id, author_key, author, canon_key, canon_name, canon_account) VALUES\n',
+			'INSERT OR REPLACE INTO pack_authors (package_id, author_key, author, canon_key, canon_name, canon_account, canon_steam) VALUES\n',
 			'',
-			redo.flatMap(item => item.list.map(row => `(${literal(row.package_id)},${literal(row.author_key)},${literal(row.author)},${literal(row.canon_key)},${literal(row.canon_name)},${literal(row.canon_account)})`)),
+			redo.flatMap(item => item.list.map(row => `(${literal(row.package_id)},${literal(row.author_key)},${literal(row.author)},${literal(row.canon_key)},${literal(row.canon_name)},${literal(row.canon_account)},${literal(row.canon_steam)})`)),
 		);
 	}
 

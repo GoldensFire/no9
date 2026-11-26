@@ -182,7 +182,9 @@ function resolveImmunePackIds(immunity, vkToSteam) {
 	}
 
 	const vkIds = immunity.vkIds ?? [];
+	const steamIds = immunity.steamIds ?? [];
 	const authorKeys = immunity.authorKeys ?? [];
+	const steamCreators = new Set(steamIds);
 
 	if (vkIds.length > 0) {
 		const places = vkIds.map(() => '?').join(', ');
@@ -196,24 +198,30 @@ function resolveImmunePackIds(immunity, vkToSteam) {
 			ids.add(row.id);
 		}
 
-		const steamCreators = new Set();
-
 		for (const url of vkUrls) {
 			for (const creatorId of vkToSteam.get(url) ?? []) {
 				steamCreators.add(creatorId);
 			}
 		}
+	}
 
-		if (steamCreators.size > 0) {
-			const creatorList = [...steamCreators];
-			const creatorPlaces = creatorList.map(() => '?').join(', ');
+	if (steamIds.length > 0) {
+		const places = steamIds.map(() => '?').join(', ');
 
-			for (const row of db.prepare(`
-				SELECT DISTINCT target_package_id AS id FROM pack_steam
-				WHERE state = 'ok' AND creator_id IN (${creatorPlaces})
-			`).all(...creatorList)) {
-				ids.add(row.id);
-			}
+		for (const row of db.prepare(`SELECT DISTINCT package_id AS id FROM pack_authors WHERE canon_steam IN (${places})`).all(...steamIds)) {
+			ids.add(row.id);
+		}
+	}
+
+	if (steamCreators.size > 0) {
+		const creatorList = [...steamCreators];
+		const creatorPlaces = creatorList.map(() => '?').join(', ');
+
+		for (const row of db.prepare(`
+			SELECT DISTINCT target_package_id AS id FROM pack_steam
+			WHERE state = 'ok' AND creator_id IN (${creatorPlaces})
+		`).all(...creatorList)) {
+			ids.add(row.id);
 		}
 	}
 

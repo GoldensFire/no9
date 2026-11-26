@@ -55,6 +55,9 @@ export const AUTHOR_NAMES_TABLE_SQL = `
 	)
 `;
 
+/** Приставка ключа Steam-автора в author_names.vk_id (без перестройки таблицы). */
+export const STEAM_NAME_PREFIX = 'steam:';
+
 /**
  * Действующие выборы: строка {k, name} на человека (canon_key), за которым
  * выбор сейчас признан.
@@ -62,15 +65,14 @@ export const AUTHOR_NAMES_TABLE_SQL = `
  * Выбор признан, когда совпало всё сразу:
  *
  *   выбранное написание стоит в паках этого человека и выложено с той самой
- *     страницы ВК, чей это выбор;
- *   у человека нет ни одной подписи, которая вела бы на другую страницу
- *     или не вела бы ни на какую (canon_account пуст — значит, подпись
- *     встречается у двух страниц);
+ *     страницы ВК или того самого аккаунта Steam, чей это выбор;
+ *   у человека нет ни одной подписи, которая вела бы на другую страницу/аккаунт
+ *     или не вела бы ни на какую;
  *   ни в одном его паке нет другого человека.
  *
  * Стоит это немного: выборов единицы, и каждый проверяется по указателям
- * ix_pack_authors_account и ix_pack_authors_canon, а соседи по паку — по
- * первичному ключу pack_authors.
+ * ix_pack_authors_account, ix_pack_authors_steam и ix_pack_authors_canon,
+ * а соседи по паку — по первичному ключу pack_authors.
  *
  * Порядок обхода назван прямо — CROSS JOIN от выборов к подписям и INDEXED BY
  * у подписей, — и это не украшение. Предоставленный сам себе, планировщик
@@ -84,9 +86,27 @@ export const CHOSEN_NAMES_SQL = `
 	FROM author_names n
 	CROSS JOIN pack_authors a INDEXED BY ix_pack_authors_account
 		ON a.canon_account = n.vk_id AND a.author = n.name
-	WHERE NOT EXISTS (
+	WHERE n.vk_id NOT LIKE 'steam:%'
+	AND NOT EXISTS (
 		SELECT 1 FROM pack_authors o
 		WHERE o.canon_key = a.canon_key AND (o.canon_account IS NULL OR o.canon_account <> n.vk_id)
+	)
+	AND NOT EXISTS (
+		SELECT 1 FROM pack_authors m
+		JOIN pack_authors x ON x.package_id = m.package_id AND x.canon_key <> m.canon_key
+		WHERE m.canon_key = a.canon_key
+	)
+	GROUP BY a.canon_key
+	UNION ALL
+	SELECT a.canon_key AS k, MIN(n.name) AS name
+	FROM author_names n
+	CROSS JOIN pack_authors a INDEXED BY ix_pack_authors_steam
+		ON a.canon_steam = SUBSTR(n.vk_id, 7) AND a.author = n.name
+	WHERE n.vk_id LIKE 'steam:%'
+	AND NOT EXISTS (
+		SELECT 1 FROM pack_authors o
+		WHERE o.canon_key = a.canon_key
+			AND (o.canon_account IS NOT NULL OR o.canon_steam IS NULL OR o.canon_steam <> SUBSTR(n.vk_id, 7))
 	)
 	AND NOT EXISTS (
 		SELECT 1 FROM pack_authors m

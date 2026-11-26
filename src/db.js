@@ -106,7 +106,11 @@ CREATE TABLE IF NOT EXISTS planned (
 
    canon_account — номер той самой страницы ВК. По нему сайт узнаёт автора
    в лицо: вошедший через ВК получает подтверждённое авторство своих паков,
-   не доказывая ничего отдельно (см. cf/src/library/authorship.js). */
+   не доказывая ничего отдельно (см. cf/src/library/authorship.js).
+
+   canon_steam — SteamID64 создателя в Мастерской Steam для чистых Steam-подписей
+   (без одиночных паков в ВК и не примыкающих к ВК-группе): по нему сайт узнаёт
+   автора, вошедшего через Steam или привязавшего Steam в настройках. */
 CREATE TABLE IF NOT EXISTS pack_authors (
 	package_id INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
 	author_key TEXT NOT NULL,
@@ -114,6 +118,7 @@ CREATE TABLE IF NOT EXISTS pack_authors (
 	canon_key TEXT,
 	canon_name TEXT,
 	canon_account TEXT,
+	canon_steam TEXT,
 	PRIMARY KEY (package_id, author_key)
 );
 
@@ -160,7 +165,11 @@ CREATE TABLE IF NOT EXISTS pack_formats (
 
 /* Полная длительность пака, целые секунды (см. src/pack-duration.js).
    Считается по content.xml и заголовкам аудио/видео в одном проходе
-   с измерением медиа (см. fetchDurations в src/indexer/backfill.js).
+   с измерением медиа (см. fetchDurations в src/indexer/backfill.js),
+   а для паков без аудио/видео — сразу при разборе (src/indexer/parse.js).
+   duration — чистая длительность контента, breakdown — компактный JSON
+   сырых компонент (текст, картинки, звук, видео, раунды, финал, таймеры)
+   для мгновенного пересчёта игрового времени без сетевых запросов.
    Своей таблицей, а не колонкой packages: та в D1 упёрлась в сто столбцов
    ответа (см. «Дозаливка колонок» ниже). У пака без вопросов или контента
    строка лежит с нулём, чтобы не вставать в очередь каждую ночь.
@@ -169,6 +178,7 @@ CREATE TABLE IF NOT EXISTS pack_formats (
 CREATE TABLE IF NOT EXISTS pack_duration (
 	package_id INTEGER PRIMARY KEY REFERENCES packages (id) ON DELETE CASCADE,
 	duration INTEGER NOT NULL,
+	breakdown TEXT,
 	measured_at INTEGER NOT NULL
 );
 
@@ -353,6 +363,13 @@ db.prepare(`
 // пака. Новому полю пака место в своей таблице рядом (как pack_formats или
 // themes у stats), а не здесь
 const existingColumns = new Set(db.prepare(`PRAGMA table_info(packages)`).all().map(c => c.name));
+
+// Дозаливка breakdown в существующую таблицу pack_duration (см. src/pack-duration.js)
+const durationColumns = new Set(db.prepare(`PRAGMA table_info(pack_duration)`).all().map(c => c.name));
+
+if (!durationColumns.has('breakdown')) {
+	db.exec(`ALTER TABLE pack_duration ADD COLUMN breakdown TEXT`);
+}
 
 for (const [name, definition] of [
 	['tags_key', 'TEXT'],
@@ -734,6 +751,11 @@ export function markObscene(where = '', params = []) {
 		// видов — vk.com/id123 и vk.com/короткое_имя, — а ВК при входе
 		// называет только номер, и сравнивать с адресом его нечем
 		['canon_account', 'TEXT'],
+
+		// SteamID64 создателя в Мастерской Steam — только для чистых Steam-подписей,
+		// не связанных с ВК-аккаунтами (см. mergeAuthors в src/indexer/authors.js).
+		// По этой колонке сайт узнаёт Steam-автора без обхода всей таблицы подписей.
+		['canon_steam', 'TEXT'],
 	]) {
 		if (!columns.has(name)) {
 			db.exec(`ALTER TABLE pack_authors ADD COLUMN ${name} ${definition}`);
@@ -754,6 +776,9 @@ export function markObscene(where = '', params = []) {
 	// подписи принадлежат вот этой странице». Без него он обходил бы всю таблицу
 	// подписей — двадцать тысяч строк, считанных по тарифу D1, на каждый вход
 	db.exec('CREATE INDEX IF NOT EXISTS ix_pack_authors_account ON pack_authors (canon_account)');
+
+	// То же для входа и привязки Steam: поиск подписей по SteamID64 без обхода таблицы
+	db.exec('CREATE INDEX IF NOT EXISTS ix_pack_authors_steam ON pack_authors (canon_steam)');
 }
 
 // Ники, которые авторы выбрали себе на сайте. Хозяин у этой таблицы — база

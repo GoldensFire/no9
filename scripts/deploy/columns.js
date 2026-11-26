@@ -81,6 +81,11 @@ const COLUMNS = [
 	['author_texts', 'twitch', "TEXT NOT NULL DEFAULT ''"],
 	['author_texts', 'youtube', "TEXT NOT NULL DEFAULT ''"],
 	['author_texts', 'vk', "TEXT NOT NULL DEFAULT ''"],
+	// SteamID64 основного входа через Steam OpenID (cf/src/auth/steam.js).
+	// Без UNIQUE здесь: SQLite не разрешает UNIQUE в ADD COLUMN — уникальность
+	// обеспечивает ix_users_steam следом в cf/schema.sql. Все привязанные аккаунты
+	// Steam (если их несколько) лежат в таблице user_steam, как user_vk для ВК
+	['users', 'steam_id', 'TEXT'],
 ];
 
 /**

@@ -240,17 +240,20 @@ export async function mergeAuthors() {
 
 	const write = db.prepare('UPDATE pack_authors SET canon_key = ?, canon_name = ? WHERE author_key = ?');
 	const mark = db.prepare('UPDATE pack_authors SET canon_account = ? WHERE author_key = ?');
+	const markSteam = db.prepare('UPDATE pack_authors SET canon_steam = ? WHERE author_key = ?');
 	const reset = db.prepare('UPDATE pack_authors SET canon_key = author_key, canon_name = author WHERE canon_key <> author_key');
 	const unmark = db.prepare('UPDATE pack_authors SET canon_account = NULL WHERE canon_account IS NOT NULL');
+	const unmarkSteam = db.prepare('UPDATE pack_authors SET canon_steam = NULL WHERE canon_steam IS NOT NULL');
 
 	// Сначала всё возвращается к подписям, потом сливается заново. Иначе слияние,
 	// отменённое новыми паками (подпись встретилась у второго аккаунта), осталось
-	// бы в базе навсегда. То же и со страницей ВК: подпись, у которой появился
-	// второй аккаунт, своего человека больше не называет, и метка обязана сойти —
-	// иначе на сайте остался бы подтверждённый автор, которого уже нечем
+	// бы в базе навсегда. То же и со страницей ВК (и SteamID64): подпись, у которой
+	// появился второй аккаунт, своего человека больше не называет, и метка обязана
+	// сойти — иначе на сайте остался бы подтверждённый автор, которого уже нечем
 	// подтвердить (см. cf/src/library/authorship.js)
 	reset.run();
 	unmark.run();
+	unmarkSteam.run();
 
 	// Главное написание — каждой подписи своё, ещё до всякого слияния.
 	//
@@ -385,8 +388,10 @@ export async function mergeAuthors() {
 	}
 
 	const steamAliased = new Set();
+	const steamAliasTwin = new Map();
 	let steamMerged = 0;
 	let steamPeople = 0;
+	let steamMarked = 0;
 
 	for (const [creator, group] of bySteamCreator) {
 		for (const item of group) {
@@ -398,6 +403,7 @@ export async function mergeAuthors() {
 				const twinRow = db.prepare('SELECT canon_key, canon_name FROM pack_authors WHERE author_key = ? LIMIT 1').get(twin.key);
 				write.run(twinRow?.canon_key ?? twin.key, twinRow?.canon_name ?? mainSpelling(twin), item.key);
 				steamAliased.add(item.key);
+				steamAliasTwin.set(item.key, twin);
 				typos++;
 				say('authors', `${twinRow?.canon_name ?? mainSpelling(twin)}: ${item.key} — опечатка (Steam)`);
 			}
@@ -407,16 +413,14 @@ export async function mergeAuthors() {
 	for (const [creator, group] of bySteamCreator) {
 		const own = group.filter(item => !steamAliased.has(item.key));
 
-		if (own.length === 0) {
-			continue;
-		}
-
 		// Если этот аккаунт Мастерской Steam связан ровно с одним ВК-аккаунтом,
-		// примыкаем его Steam-подписи к тому же человеку (ВК-группе этого аккаунта)
+		// примыкаем его Steam-подписи к тому же человеку (ВК-группе этого аккаунта).
+		// canon_steam такой группе не ставится намеренно: в каноне участвуют паки ВК,
+		// и один перезалив в Мастерскую не должен отдавать авторство ВК-автора
 		const vkAccounts = vkAccountsBySteamCreator.get(creator);
 		let vkOwn = null;
 
-		if (vkAccounts && vkAccounts.size === 1) {
+		if (own.length > 0 && vkAccounts && vkAccounts.size === 1) {
 			const vkAcc = [...vkAccounts][0];
 			const candidate = (byAccount.get(vkAcc) ?? []).filter(item => !aliased.has(item.key));
 
@@ -440,6 +444,26 @@ export async function mergeAuthors() {
 			steamMerged += own.length;
 			say('authors', `${best} (Steam+ВК): ${own.map(item => item.key).join(', ')}`);
 			continue;
+		}
+
+		// Строгое правило для canon_steam: метку получают только чистые Steam-подписи
+		// (accounts.size === 0 && steamCreators.size === 1), не примыкающие к ВК-группе.
+		// Опечатка из steamAliased получает метку, только если её двойник — тоже чистая
+		// Steam-подпись того же creator_id: иначе опечатка чужого или многоаккаунтного
+		// автора отдала бы его canon_key через canon_steam
+		if (/^7656\d{13}$/.test(creator)) {
+			for (const item of group) {
+				if (steamAliased.has(item.key)) {
+					const twin = steamAliasTwin.get(item.key);
+
+					if (!twin || twin.accounts.size > 0 || twin.steamCreators.size !== 1 || !twin.steamCreators.has(creator)) {
+						continue;
+					}
+				}
+
+				markSteam.run(creator, item.key);
+				steamMarked++;
+			}
 		}
 
 		if (own.length < 2) {
@@ -470,7 +494,8 @@ export async function mergeAuthors() {
 	say('authors', `подписей ${signatures.size}; сведено ${merged} лишних к ${people} авторам `
 		+ `(паки выложены с одной страницы ВК)`
 		+ `${steamMerged ? ` и ${steamMerged} к ${steamPeople} авторам Steam` : ''}`
-		+ `; опечаток ${typos}; с номером страницы ${marked}; `
+		+ `; опечаток ${typos}; с номером страницы ${marked}`
+		+ `${steamMarked ? `; с SteamID ${steamMarked}` : ''}; `
 		+ `строк с ником, выбранным автором, ${chosen}`);
 }
 
