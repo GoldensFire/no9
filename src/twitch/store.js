@@ -249,51 +249,69 @@ export async function linkGames(video, packs) {
 const NOTIFY_MAX_AGE = 7 * 864e5;
 
 /**
- * Звонок авторам: их пак сыграли на стриме. Кому — тем же правилом, что
- * и разговор под паком (ownersOfPack в cf/src/library/authorship.js): страница
- * ВК, с которой пак выложен, или галочка на подписи. Кто выключил звонок
- * в настройках профиля (user_settings.notify_streams = 0), тому не кладётся.
+ * Звонок авторам: их пак сыграли на стриме Twitch ('stream') или в видео
+ * на YouTube ('youtube'). Кому — тем же правилом, что и разговор под паком
+ * (ownersOfPack в cf/src/library/authorship.js): страница ВК, аккаунт Steam
+ * или галочка на подписи. Кто выключил звонок в настройках профиля
+ * (user_settings.notify_streams = 0), тому не кладётся.
+ *
+ * Источники владельцев спрашиваются по отдельности, а не одним UNION: если
+ * на живой D1 ещё не доехала новая таблица/указатель (например, user_steam),
+ * остальные источники (ВК и галочка) всё равно отработают.
  *
  * Сбой здесь обход не роняет: записанное о стримах важнее звонка.
  *
- * @param {{createdAt}} video
+ * @param {{id?: string, createdAt: number}} video
  * @param {string[]} keys паки, впервые найденные на этой записи
  */
 export async function notifyStreamOwners(video, keys) {
-	if (!keys.length || Date.now() - video.createdAt > NOTIFY_MAX_AGE) return 0;
+	if (!keys.length || (video.createdAt && Date.now() - video.createdAt > NOTIFY_MAX_AGE)) return 0;
+	const kind = isYoutubeVod(video?.id) ? 'youtube' : 'stream';
 	const now = Date.now();
 	let sent = 0;
 	for (const key of keys) {
-		const owners = `
-			SELECT v.user_id AS id
-			FROM packages p INDEXED BY ix_packages_pack_key
-			JOIN pack_authors a ON a.package_id = p.id
-			JOIN user_vk v ON v.vk_id = a.canon_account
-			WHERE ${PACK_KEY_SQL} = ${str(key)}
-			UNION
-			SELECT s.user_id AS id
-			FROM packages p INDEXED BY ix_packages_pack_key
-			JOIN pack_authors a ON a.package_id = p.id
-			JOIN user_steam s ON s.steam_id = a.canon_steam
-			WHERE ${PACK_KEY_SQL} = ${str(key)}
-			UNION
-			SELECT u.id AS id
-			FROM packages p INDEXED BY ix_packages_pack_key
-			JOIN pack_authors a ON a.package_id = p.id
-			JOIN users u INDEXED BY ix_users_steam ON u.steam_id = a.canon_steam
-			WHERE ${PACK_KEY_SQL} = ${str(key)}
-			UNION
-			SELECT b.user_id AS id
-			FROM packages p INDEXED BY ix_packages_pack_key
-			JOIN pack_authors a ON a.package_id = p.id
-			JOIN author_badges b ON b.author_key = a.author_key OR b.author_key = a.canon_key
-			WHERE ${PACK_KEY_SQL} = ${str(key)}`;
+		const queries = [
+			`SELECT DISTINCT v.user_id AS id
+				FROM packages p INDEXED BY ix_packages_pack_key
+				JOIN pack_authors a ON a.package_id = p.id
+				JOIN user_vk v ON v.vk_id = a.canon_account
+				WHERE ${PACK_KEY_SQL} = ${str(key)}`,
+			`SELECT DISTINCT s.user_id AS id
+				FROM packages p INDEXED BY ix_packages_pack_key
+				JOIN pack_authors a ON a.package_id = p.id
+				JOIN user_steam s ON s.steam_id = a.canon_steam
+				WHERE ${PACK_KEY_SQL} = ${str(key)}`,
+			`SELECT DISTINCT u.id AS id
+				FROM packages p INDEXED BY ix_packages_pack_key
+				JOIN pack_authors a ON a.package_id = p.id
+				JOIN users u ON u.steam_id = a.canon_steam
+				WHERE ${PACK_KEY_SQL} = ${str(key)}`,
+			`SELECT DISTINCT b.user_id AS id
+				FROM packages p INDEXED BY ix_packages_pack_key
+				JOIN pack_authors a ON a.package_id = p.id
+				JOIN author_badges b ON b.author_key = a.author_key OR b.author_key = a.canon_key
+				WHERE ${PACK_KEY_SQL} = ${str(key)}`,
+		];
+		const ownerIds = new Set();
+		for (const q of queries) {
+			try {
+				const found = await askRows(q);
+				for (const r of found) {
+					const id = Math.trunc(Number(r.id));
+					if (Number.isFinite(id) && id > 0) ownerIds.add(id);
+				}
+			} catch (e) {
+				console.log(`владельцы пака ${key} (часть запроса) не прочитались: ${e.message}`);
+			}
+		}
+		if (!ownerIds.size) continue;
+		const idList = [...ownerIds].join(', ');
 		try {
 			const rows = await askRows(`INSERT INTO notifications (user_id, kind, pack_key, comment_id, actor_id, created_at)
-				SELECT o.id, 'stream', ${str(key)}, NULL, NULL, ${num(now)}
-				FROM (${owners}) o
-				LEFT JOIN user_settings s ON s.user_id = o.id
-				WHERE COALESCE(s.notify_streams, 1) = 1
+				SELECT u.id, ${str(kind)}, ${str(key)}, NULL, NULL, ${num(now)}
+				FROM users u
+				LEFT JOIN user_settings s ON s.user_id = u.id
+				WHERE u.id IN (${idList}) AND COALESCE(s.notify_streams, 1) = 1
 				RETURNING id`);
 			sent += rows.length;
 		} catch (e) {
