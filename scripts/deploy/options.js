@@ -36,7 +36,15 @@ export const thumbsPath = path.join(root, 'data', 'thumbs');
  */
 export const previewsPath = path.join(root, 'data', 'previews');
 
-export const local = process.argv.includes('--local');
+// Ключ --local означает местную копию D1 только в скриптах выкладки
+// (deploy-cf.js, deploy-logos.js). В scripts/youtube.js флаг --local включает
+// локальный OCR-движок (--engine=local) и должен писать в боевую D1;
+// для редкой отладки в местную копию D1 из других скриптов служит --local-d1.
+const entryScript = path.basename(process.argv[1] || '');
+const isDeployEntry = entryScript === 'deploy-cf.js' || entryScript === 'deploy-logos.js';
+
+export const local = (isDeployEntry && process.argv.includes('--local'))
+	|| process.argv.includes('--local-d1');
 
 /**
  * Выкладывать ли только базу, не трогая сам сайт.

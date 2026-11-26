@@ -25,6 +25,7 @@ const YT_HEADERS = {
 };
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
+let dataSearchQuotaHit = false;
 
 function decodeHtml(s) {
 	return String(s || '')
@@ -103,14 +104,18 @@ async function fetchJson(url, options = {}, tries = 3) {
 		try {
 			const r = await fetch(url, { ...options, signal: AbortSignal.timeout(25_000) });
 			const text = await r.text();
-			if (r.status >= 500 || r.status === 429) {
+			const isQuota = (r.status === 429 || r.status === 403) && /quota\s*exceeded|quotaExceeded|daily\s*limit/i.test(text);
+			if (!isQuota && (r.status >= 500 || r.status === 429)) {
 				if (i < tries) {
 					await sleep(1500 * i);
 					continue;
 				}
 			}
 			if (!r.ok) {
-				throw Object.assign(new Error(`YouTube HTTP ${r.status}: ${text.slice(0, 220)}`), { status: r.status, final: r.status < 500 && r.status !== 429 });
+				throw Object.assign(
+					new Error(`YouTube HTTP ${r.status}: ${text.slice(0, 220)}`),
+					{ status: r.status, quotaExceeded: isQuota, final: isQuota || (r.status < 500 && r.status !== 429) },
+				);
 			}
 			return JSON.parse(text);
 		} catch (e) {
@@ -205,59 +210,7 @@ function normalizePlayerVideo(id, data) {
 	};
 }
 
-/**
- * Поиск видео по запросу. Возвращает ID и превью (title/channelTitle/publishedAt/length/isLive),
- * чтобы шум отсекался ДО пачек videosById.
- *
- * @param {string} query
- * @param {{ publishedAfter?: number, maxPages?: number, days?: number, order?: 'date'|'relevance' }} [opts]
- * @returns {Promise<{ ids: string[], items: Array<object>, calls: number }>}
- */
-export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, days = 7, order = 'date' } = {}) {
-	if (config.youtubeApiKey) {
-		const ids = [];
-		const items = [];
-		const seen = new Set();
-		let pageToken = null;
-		let calls = 0;
-		for (let page = 0; page < maxPages; page++) {
-			const params = {
-				// part=snippet стоит ту же 1 единицу search-бакета, что и part=id,
-				// но сразу отдаёт заголовок, канал и live-статус для отсева до videos.list
-				part: 'snippet',
-				type: 'video',
-				videoDuration: 'long',
-				order: order === 'relevance' ? 'relevance' : 'date',
-				relevanceLanguage: 'ru',
-				maxResults: '50',
-				q: query,
-			};
-			if (publishedAfter > 0) params.publishedAfter = new Date(publishedAfter).toISOString();
-			if (pageToken) params.pageToken = pageToken;
-			const data = await dataGet('search', params);
-			calls++;
-			for (const item of data.items || []) {
-				const id = item?.id?.videoId;
-				if (!id || seen.has(id)) continue;
-				seen.add(id);
-				const sn = item.snippet || {};
-				ids.push(String(id));
-				items.push({
-					id: String(id),
-					channelId: String(sn.channelId || ''),
-					channelTitle: decodeHtml(sn.channelTitle || ''),
-					title: decodeHtml(sn.title || ''),
-					publishedAt: Date.parse(sn.publishedAt) || 0,
-					length: 0,
-					isLive: Boolean(sn.liveBroadcastContent && sn.liveBroadcastContent !== 'none'),
-				});
-			}
-			pageToken = data.nextPageToken || null;
-			if (!pageToken) break;
-		}
-		return { ids, items, calls };
-	}
-
+async function searchVideosInnertube(query, { maxPages = 1, days = 7, order = 'date', ids = [], items = [], seen = new Set() } = {}) {
 	// Безключевой запасной путь (InnerTube search):
 	// EgIIAw%3D%3D = за эту неделю, EgIIBA%3D%3D = за этот месяц,
 	// EgIYAg%3D%3D = длинные (> 20 мин) по релевантности, CAISBBgC = длинные (> 20 мин) по дате.
@@ -266,9 +219,6 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 	else if (days > 7 && days <= 31) sp = 'EgIIBA%3D%3D';
 	else if (days > 31 && order !== 'relevance') sp = 'CAISBBgC';
 
-	const ids = [];
-	const items = [];
-	const seen = new Set();
 	let continuation = null;
 	let calls = 0;
 
@@ -319,6 +269,87 @@ export async function searchVideos(query, { publishedAfter = 0, maxPages = 1, da
 }
 
 /**
+ * Поиск видео по запросу. Возвращает ID и превью (title/channelTitle/publishedAt/length/isLive),
+ * чтобы шум отсекался ДО пачек videosById.
+ *
+ * Если Data API v3 упёрся в суточный лимит Search Queries (429 / quotaExceeded), автоматически
+ * переключается на InnerTube для этого и всех последующих запросов в запуске.
+ * При `useInnertube: true` сразу ходит через InnerTube (бережёт 100/сут квоту ключа для облака).
+ *
+ * @param {string} query
+ * @param {{ publishedAfter?: number, maxPages?: number, innertubeMaxPages?: number|null, days?: number, order?: 'date'|'relevance', useInnertube?: boolean }} [opts]
+ * @returns {Promise<{ ids: string[], items: Array<object>, calls: number, mode: 'data-v3'|'innertube', quotaFallback: boolean }>}
+ */
+export async function searchVideos(query, {
+	publishedAfter = 0,
+	maxPages = 1,
+	innertubeMaxPages = null,
+	days = 7,
+	order = 'date',
+	useInnertube = false,
+} = {}) {
+	const itPages = innertubeMaxPages ?? maxPages;
+
+	if (!useInnertube && config.youtubeApiKey && !dataSearchQuotaHit) {
+		const ids = [];
+		const items = [];
+		const seen = new Set();
+		let pageToken = null;
+		let calls = 0;
+		try {
+			for (let page = 0; page < maxPages; page++) {
+				const params = {
+					// part=snippet стоит ту же 1 единицу search-бакета, что и part=id,
+					// но сразу отдаёт заголовок, канал и live-статус для отсева до videos.list
+					part: 'snippet',
+					type: 'video',
+					videoDuration: 'long',
+					order: order === 'relevance' ? 'relevance' : 'date',
+					relevanceLanguage: 'ru',
+					maxResults: '50',
+					q: query,
+				};
+				if (publishedAfter > 0) params.publishedAfter = new Date(publishedAfter).toISOString();
+				if (pageToken) params.pageToken = pageToken;
+				const data = await dataGet('search', params);
+				calls++;
+				for (const item of data.items || []) {
+					const id = item?.id?.videoId;
+					if (!id || seen.has(id)) continue;
+					seen.add(id);
+					const sn = item.snippet || {};
+					ids.push(String(id));
+					items.push({
+						id: String(id),
+						channelId: String(sn.channelId || ''),
+						channelTitle: decodeHtml(sn.channelTitle || ''),
+						title: decodeHtml(sn.title || ''),
+						publishedAt: Date.parse(sn.publishedAt) || 0,
+						length: 0,
+						isLive: Boolean(sn.liveBroadcastContent && sn.liveBroadcastContent !== 'none'),
+					});
+				}
+				pageToken = data.nextPageToken || null;
+				if (!pageToken) break;
+			}
+			return { ids, items, calls, mode: 'data-v3', quotaFallback: false };
+		} catch (e) {
+			if (!e.quotaExceeded && e.status !== 429) throw e;
+			dataSearchQuotaHit = true;
+			const fb = await searchVideosInnertube(query, { maxPages: itPages, days, order, ids, items, seen });
+			return { ids: fb.ids, items: fb.items, calls: calls + fb.calls, mode: 'innertube', quotaFallback: true };
+		}
+	}
+
+	const res = await searchVideosInnertube(query, { maxPages: itPages, days, order });
+	return {
+		...res,
+		mode: 'innertube',
+		quotaFallback: Boolean(!useInnertube && config.youtubeApiKey && dataSearchQuotaHit),
+	};
+}
+
+/**
  * Подробности видео по списку ID. Удалённые/недоступные отсутствуют в Map (или null).
  *
  * @param {string[]} ids
@@ -329,8 +360,9 @@ export async function videosById(ids) {
 	const videos = new Map();
 	const missing = [];
 	let calls = 0;
+	let botChecked = 0;
 
-	if (!unique.length) return { videos, missing, calls };
+	if (!unique.length) return { videos, missing, calls, botChecked };
 
 	if (config.youtubeApiKey) {
 		for (let i = 0; i < unique.length; i += 50) {
@@ -351,7 +383,7 @@ export async function videosById(ids) {
 			}
 			for (const id of part) if (!got.has(id)) missing.push(id);
 		}
-		return { videos, missing, calls };
+		return { videos, missing, calls, botChecked };
 	}
 
 	// InnerTube player: параллельно по 6 запросов (каждый ~150 мс)
@@ -365,7 +397,8 @@ export async function videosById(ids) {
 				calls++;
 				const v = normalizePlayerVideo(id, data);
 				if (v?.botCheck) {
-					// Бот-проверка YouTube с датацентрового IP — не считаем видео удалённым
+					// Бот-проверка YouTube с этого IP — не считаем видео удалённым, но учитываем для диагностики
+					botChecked++;
 				} else if (v) {
 					videos.set(v.id, v);
 				} else {
@@ -377,7 +410,7 @@ export async function videosById(ids) {
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, unique.length) }, worker));
-	return { videos, missing, calls };
+	return { videos, missing, calls, botChecked };
 }
 
 /**

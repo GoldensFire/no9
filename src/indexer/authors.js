@@ -113,7 +113,7 @@ export async function mergeAuthors() {
 	// пак, снятый как выложенный не автором: тоже (см. «перезаливы»)
 	const rows = db.prepare(`
 		SELECT a.author_key AS key, a.author AS name, p.vk_author_url AS account,
-			ps.creator_id AS steam_creator,
+			COALESCE(ps_own.creator_id, ps_mirror.creator_id) AS steam_creator,
 			(p.source_key LIKE 'steam:%') AS is_steam,
 			(SELECT COUNT(*) FROM pack_authors b WHERE b.package_id = a.package_id) > 1 AS shared,
 			(p.status = 'copy' OR CAST(COALESCE(p.copy_of, p.id) AS TEXT) IN (SELECT value FROM json_each(?))) AS reupload,
@@ -121,8 +121,9 @@ export async function mergeAuthors() {
 			SUM(CASE WHEN p.status = 'ok' THEN 1 ELSE 0 END) AS live
 		FROM pack_authors a
 		JOIN packages p ON p.id = a.package_id
-		LEFT JOIN pack_steam ps ON ps.package_id = p.id
-		GROUP BY a.author_key, a.author, p.vk_author_url, ps.creator_id, is_steam, shared, reupload
+		LEFT JOIN pack_steam ps_own ON ps_own.package_id = p.id
+		LEFT JOIN pack_steam ps_mirror ON ps_mirror.target_package_id = p.id AND ps_mirror.is_primary = 1 AND ps_mirror.state = 'ok'
+		GROUP BY a.author_key, a.author, p.vk_author_url, COALESCE(ps_own.creator_id, ps_mirror.creator_id), is_steam, shared, reupload
 	`).all(JSON.stringify(reuploads));
 
 	/**
@@ -185,6 +186,10 @@ export async function mergeAuthors() {
 			}
 
 			continue;
+		}
+
+		if (steamCreator) {
+			item.steamCreators.add(steamCreator);
 		}
 
 		// Пак, выложенный в ВК без адреса автора, аккаунтом не считается:
@@ -326,20 +331,42 @@ export async function mergeAuthors() {
 		say('authors', `${best}: ${own.map(item => item.key).join(', ')}`);
 	}
 
-	// ————— Steam-only авторы: склейка подписей одного creator_id (раздел 6.1) —————
-	// Трогаем только подписи без единого ВК-аккаунта: canon_account (номер ВК) им не ставится.
+	// ————— Steam-авторы: склейка подписей одного creator_id (ровно как для ВК) —————
+	//
+	// Все подписи, чьи одиночные паки выложены с одного аккаунта Мастерской Steam
+	// (steamCreators.size === 1) и не принадлежат ни одной странице ВК в одиночных
+	// паках (accounts.size === 0), сводятся к одному автору. Если у того же
+	// creator_id есть подписи ровно с ОДНОГО ВК-аккаунта (и никаких других
+	// ВК-аккаунтов на этом creator_id нет — то есть это не перезаливщик чужих паков),
+	// Steam-подписи примыкают к тому же человеку.
 	const bySteamCreator = new Map();
 	const seenBySteamCreator = new Map();
+	const vkAccountsBySteamCreator = new Map();
 
 	for (const item of signatures.values()) {
-		if (item.seen.size > 0 || aliased.has(item.key)) {
-			continue;
-		}
-
 		for (const creator of item.steamSeen) {
 			const all = seenBySteamCreator.get(creator) ?? [];
 			all.push(item);
 			seenBySteamCreator.set(creator, all);
+		}
+
+		// ВК-аккаунты, встреченные на этом creator_id в одиночных паках
+		if (item.accounts.size > 0) {
+			for (const creator of item.steamSeen) {
+				const vkSet = vkAccountsBySteamCreator.get(creator) ?? new Set();
+
+				for (const acc of item.accounts) {
+					if (!acc.startsWith('?')) {
+						vkSet.add(acc);
+					}
+				}
+
+				vkAccountsBySteamCreator.set(creator, vkSet);
+			}
+		}
+
+		if (item.accounts.size > 0 || aliased.has(item.key)) {
+			continue;
 		}
 
 		if (item.steamCreators.size !== 1) {
@@ -367,16 +394,53 @@ export async function mergeAuthors() {
 				&& other.packs > item.packs && nearDuplicate(item.key, other.key));
 
 			if (twin) {
-				write.run(twin.key, mainSpelling(twin), item.key);
+				// Если двойник уже сведён в ВК-проходе, берём его текущий канон
+				const twinRow = db.prepare('SELECT canon_key, canon_name FROM pack_authors WHERE author_key = ? LIMIT 1').get(twin.key);
+				write.run(twinRow?.canon_key ?? twin.key, twinRow?.canon_name ?? mainSpelling(twin), item.key);
 				steamAliased.add(item.key);
 				typos++;
-				say('authors', `${mainSpelling(twin)}: ${item.key} — опечатка (Steam)`);
+				say('authors', `${twinRow?.canon_name ?? mainSpelling(twin)}: ${item.key} — опечатка (Steam)`);
 			}
 		}
 	}
 
-	for (const [, group] of bySteamCreator) {
+	for (const [creator, group] of bySteamCreator) {
 		const own = group.filter(item => !steamAliased.has(item.key));
+
+		if (own.length === 0) {
+			continue;
+		}
+
+		// Если этот аккаунт Мастерской Steam связан ровно с одним ВК-аккаунтом,
+		// примыкаем его Steam-подписи к тому же человеку (ВК-группе этого аккаунта)
+		const vkAccounts = vkAccountsBySteamCreator.get(creator);
+		let vkOwn = null;
+
+		if (vkAccounts && vkAccounts.size === 1) {
+			const vkAcc = [...vkAccounts][0];
+			const candidate = (byAccount.get(vkAcc) ?? []).filter(item => !aliased.has(item.key));
+
+			if (candidate.length > 0) {
+				vkOwn = candidate;
+			}
+		}
+
+		if (vkOwn) {
+			const combined = [...vkOwn, ...own];
+			const best = bestSpelling(combined.flatMap(item => spellingCounts(item)));
+			const canonKey = combined
+				.slice()
+				.sort((a, b) => b.packs - a.packs || a.key.length - b.key.length || a.key.localeCompare(b.key))[0].key;
+
+			for (const item of combined) {
+				write.run(canonKey, best, item.key);
+			}
+
+			steamPeople++;
+			steamMerged += own.length;
+			say('authors', `${best} (Steam+ВК): ${own.map(item => item.key).join(', ')}`);
+			continue;
+		}
 
 		if (own.length < 2) {
 			continue;

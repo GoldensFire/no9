@@ -191,6 +191,7 @@ export async function bridgeTwitchChannels(twitchLogins, knownChannelIds, knownL
  * @param {Array<object>} [opts.channels] известные каналы из youtube_channels
  * @param {Map<string, { scanned: number, withPacks: number }>} [opts.channelYield] отдача каналов из D1
  * @param {boolean} [opts.rescan] пересматривать уже просмотренные
+ * @param {boolean} [opts.preferInnertubeSearch] искать через InnerTube (на домашнем ПК бережёт 100/сут квоту search.list для облака)
  */
 export async function discover({
 	days = 7,
@@ -199,19 +200,24 @@ export async function discover({
 	channels = [],
 	channelYield = new Map(),
 	rescan = false,
+	preferInnertubeSearch = false,
 } = {}) {
 	const now = Date.now();
 	const publishedAfter = backfill || days <= 0 ? 0 : now - days * 864e5;
 	const channelCutoff = (!backfill && publishedAfter > 0) ? now - Math.max(days, 14) * 864e5 : 0;
-	const mode = apiMode();
+	const baseMode = apiMode();
+	const useInnertubeSearch = preferInnertubeSearch || baseMode !== 'data-v3';
 	// В Data API v3 страница поиска = 50 видео (и жёсткий лимит 100 вызовов/сут),
-	// а в InnerTube (на домашнем ПК без YOUTUBE_API_KEY) страница = ~20 видео и квоты нет:
-	// берём больше страниц, чтобы домашний прогон видел тот же глубокий бэклог, что и Data API v3.
-	const datePages = backfill ? (mode === 'data-v3' ? 3 : 8) : 1;
-	const relevancePages = backfill ? (mode === 'data-v3' ? 2 : 6) : 0;
+	// а в InnerTube страница = ~20 видео и квоты нет: в локальном режиме сразу
+	// ищем через InnerTube (8 + 6 стр.), чтобы не сжигать суточную квоту ключа для облака,
+	// а в облачном режиме при 429 автоматически переключаемся на InnerTube.
+	const itDatePages = backfill ? 8 : 1;
+	const itRelPages = backfill ? 6 : 0;
+	const datePages = useInnertubeSearch ? itDatePages : (backfill ? 3 : 1);
+	const relevancePages = useInnertubeSearch ? itRelPages : (backfill ? 2 : 0);
 
 	const stats = {
-		mode,
+		mode: baseMode === 'data-v3' && useInnertubeSearch ? 'data-v3 + innertube-search' : baseMode,
 		searchQueries: 0,
 		searchCalls: 0,
 		searchRaw: 0,
@@ -250,17 +256,40 @@ export async function discover({
 	};
 
 	// 1. Поиск по запросам: в обычном прогоне 1 стр. по дате (11 вызовов),
-	// в backfill — 3 стр. по дате + 2 стр. по релевантности (до 55 вызовов из 100/сут),
-	// чтобы доставать не только последние 2–3 недели, но и многолетний бэклог 2020–2026.
+	// в backfill — 3+2 стр. (data-v3) или 8+6 стр. (InnerTube), чтобы доставать
+	// не только последние 2–3 недели, но и многолетний бэклог 2020–2026.
+	let quotaFallbackLogged = false;
+	const noteQuotaFallback = res => {
+		if (!res?.quotaFallback || quotaFallbackLogged) return;
+		quotaFallbackLogged = true;
+		stats.mode = 'data-v3 (поиск → innertube по 429)';
+		console.warn('⚠️ YouTube Data API v3 search.list упёрся в суточную квоту (429) — поиск переключён на InnerTube');
+	};
 	for (const q of SEARCH_QUERIES) {
 		try {
-			const res = await searchVideos(q, { publishedAfter, maxPages: datePages, days: backfill ? 0 : days, order: 'date' });
+			const res = await searchVideos(q, {
+				publishedAfter,
+				maxPages: datePages,
+				innertubeMaxPages: itDatePages,
+				days: backfill ? 0 : days,
+				order: 'date',
+				useInnertube: useInnertubeSearch,
+			});
+			noteQuotaFallback(res);
 			stats.searchQueries++;
 			stats.searchCalls += res.calls;
 			stats.searchRaw += res.ids.length;
 			for (const item of res.items || res.ids) addCandidate(item, 'search');
 			if (relevancePages > 0) {
-				const rel = await searchVideos(q, { publishedAfter: 0, maxPages: relevancePages, days: 0, order: 'relevance' });
+				const rel = await searchVideos(q, {
+					publishedAfter: 0,
+					maxPages: relevancePages,
+					innertubeMaxPages: itRelPages,
+					days: 0,
+					order: 'relevance',
+					useInnertube: useInnertubeSearch,
+				});
+				noteQuotaFallback(rel);
 				stats.searchCalls += rel.calls;
 				stats.searchRaw += rel.ids.length;
 				for (const item of rel.items || rel.ids) addCandidate(item, 'search');
@@ -361,9 +390,14 @@ export async function discover({
 	}
 
 	// 3. Метаданные пачкой (videos.list / player) — только для прошедших предфильтр кандидатов
-	const { videos, missing } = await videosById(toFetch);
+	const { videos, missing, botChecked = 0 } = await videosById(toFetch);
 	stats.videosFetched = videos.size;
 	skipped.missing = missing.length;
+	if (botChecked > 0) {
+		const msg = `InnerTube player: YouTube закрыл ${botChecked} из ${toFetch.length} видео проверкой на бота (положите data/youtube-api-key.txt или смените IP)`;
+		stats.errors.push(msg);
+		console.warn(`⚠️ ${msg}`);
+	}
 
 	const todo = [];
 	for (const [id, v] of videos) {

@@ -5,11 +5,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { local as localD1 } from '../../scripts/deploy/options.js';
 import { buildIndex } from '../twitch/index.js';
 import { cleanVideoId, videosById } from './api.js';
 import { bridgeTwitchChannels, discover } from './discover.js';
 import { createYoutubeGemini, KeyBlockedError, QuotaExhaustedError } from './gemini.js';
-import { AgeRestrictedError, createLocalScanner, LocalBotCheckError, scanYoutubeVideoLocal } from './local.js';
+import { AgeRestrictedError, createLocalScanner, LocalBotCheckError, LocalExtractorError, scanYoutubeVideoLocal } from './local.js';
 import { details, markdown, writeSummary } from './report.js';
 import { scanYoutubeVideo } from './scan.js';
 import {
@@ -141,6 +142,7 @@ export async function run(o = options()) {
 			channels,
 			channelYield,
 			rescan: o.rescan,
+			preferInnertubeSearch: o.engine === 'local' || o.engine === 'hybrid',
 		});
 		items = discovery.todo;
 		if (useD1 && discovery.checkedChannelIds.length) {
@@ -170,10 +172,14 @@ export async function run(o = options()) {
 		? createYoutubeGemini({ log: s => console.log(s) })
 		: null;
 
+	const cookieNote = localScanner?.cookies
+		? `, cookies=${path.basename(localScanner.cookies)}`
+		: (localScanner?.cookiesFromBrowser ? `, cookies=${localScanner.cookiesFromBrowser}` : '');
+	const d1Note = useD1 ? (localD1 ? 'локальная D1 (.wrangler)' : 'боевая D1') : 'dry-run';
 	const engineNote = localScanner
-		? `${o.engine} (ffmpeg=${localScanner.ffmpeg}, воркеров=${localScanner.workers}${localScanner.cookies || localScanner.cookiesFromBrowser ? ', cookies' : ''})`
+		? `${o.engine} (ffmpeg=${localScanner.ffmpeg}, воркеров=${localScanner.workers}${cookieNote})`
 		: 'gemini';
-	console.log(`словарь: ${index.packs.size} паков, ${index.themes.length} тем, ${index.ms} мс; движок: ${engineNote}; к просмотру ${items.length} (лимит ${o.limit})`);
+	console.log(`словарь: ${index.packs.size} паков, ${index.themes.length} тем, ${index.ms} мс; движок: ${engineNote}; база: ${d1Note}; к просмотру ${items.length} (лимит ${o.limit})`);
 
 	const ctx = { index, gemini, local: localScanner, log: s => console.log(s) };
 
@@ -182,6 +188,8 @@ export async function run(o = options()) {
 	let waitedQuotaReset = false;
 	let geminiExhausted = false;
 	let skippedAge = 0;
+	let consecutiveSystemic = 0;
+	const MAX_CONSECUTIVE_SYSTEMIC = 5;
 
 	const queue = items.slice(0, o.limit);
 	try {
@@ -229,8 +237,10 @@ export async function run(o = options()) {
 				// local или hybrid
 				try {
 					res = await scanYoutubeVideoLocal(v, ctx);
+					consecutiveSystemic = 0;
 				} catch (err) {
 					if (err instanceof AgeRestrictedError) {
+						consecutiveSystemic = 0;
 						if (o.engine === 'hybrid' && gemini && !geminiExhausted) {
 							console.log(`  [hybrid] ролик 18+ → передаю в Gemini Video API`);
 							try {
@@ -246,14 +256,24 @@ export async function run(o = options()) {
 							}
 						} else {
 							skippedAge++;
-							console.log(`  → пропущено (18+, оставлено для Gemini / --cookies)`);
+							console.log(`  → пропущено (${err.message})`);
 							continue;
 						}
-					} else if (err instanceof LocalBotCheckError) {
+					} else if (err instanceof LocalBotCheckError || err instanceof LocalExtractorError) {
 						stoppedReason = err.message;
 						console.warn(`⚠️ ${stoppedReason}`);
 						break;
 					} else {
+						if (err.systemic) {
+							consecutiveSystemic++;
+							if (consecutiveSystemic >= MAX_CONSECUTIVE_SYSTEMIC) {
+								stoppedReason = `${consecutiveSystemic} видео подряд упали с системной ошибкой yt-dlp (${err.message}) — прогон остановлен`;
+								console.warn(`⚠️ ${stoppedReason}`);
+								break;
+							}
+						} else {
+							consecutiveSystemic = 0;
+						}
 						res = { status: 'error', engine: 'local', calls: 0, tokensIn: 0, frames: 0, signs: 0, error: err.message, packs: [], near: [], names: [], inside: [] };
 					}
 				}

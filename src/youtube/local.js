@@ -31,7 +31,7 @@ const MAX_OPENING_FRAMES = 10;
 const PROBE_FRACTIONS = [0.08, 0.24, 0.40, 0.56, 0.72, 0.88];
 const FORMAT_SELECTOR = 'bestvideo[height<=720][ext=mp4]/best[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best';
 const FFMPEG_TIMEOUT_MS = 35_000;
-const YTDLP_TIMEOUT_MS = 35_000;
+const YTDLP_TIMEOUT_MS = 45_000;
 
 export class AgeRestrictedError extends Error {
 	constructor(message) {
@@ -54,6 +54,13 @@ export class LocalBotCheckError extends Error {
 	}
 }
 
+export class LocalExtractorError extends Error {
+	constructor(message) {
+		super(message);
+		this.name = 'LocalExtractorError';
+	}
+}
+
 function commandExists(cmd) {
 	try {
 		const res = spawnSync(cmd, ['-version'], { stdio: 'ignore', windowsHide: true });
@@ -73,6 +80,7 @@ export function findFfmpeg() {
 		const home = os.homedir();
 		const localApp = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
 		const candidates = [
+			path.join(home, 'Desktop', 'SI-HYX', 'bin', 'ffmpeg.exe'),
 			'C:\\Program Files\\ShareX\\ffmpeg.exe',
 			'C:\\Program Files\\Shutter Encoder\\Library\\ffmpeg.exe',
 			'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe',
@@ -108,12 +116,19 @@ export function detectLocalTools() {
 	return { ytdlp, ffmpeg, tesseract };
 }
 
-/** Подобрать cookies, если указаны флагом или лежат в data/youtube-cookies.txt. */
+/** Подобрать cookies, если указаны флагом или лежат в data/youtube-cookies.txt / на рабочем столе. */
 export function resolveCookiesOption({ cookies = null, cookiesFromBrowser = null } = {}) {
+	if (cookies === false || cookies === 'none') return { cookies: null, cookiesFromBrowser: null };
 	if (cookies) return { cookies: path.resolve(String(cookies)), cookiesFromBrowser: null };
 	if (cookiesFromBrowser) return { cookies: null, cookiesFromBrowser: String(cookiesFromBrowser) };
-	const def = path.join(root, 'data', 'youtube-cookies.txt');
-	if (fs.existsSync(def)) return { cookies: def, cookiesFromBrowser: null };
+	const candidates = [
+		path.join(root, 'data', 'youtube-cookies.txt'),
+		path.join(os.homedir(), 'Desktop', 'YouTubecookies.txt'),
+		path.join(os.homedir(), 'Desktop', 'youtube-cookies.txt'),
+	];
+	for (const p of candidates) {
+		if (fs.existsSync(p)) return { cookies: p, cookiesFromBrowser: null };
+	}
 	return { cookies: null, cookiesFromBrowser: null };
 }
 
@@ -137,15 +152,41 @@ export function createLocalScanner({ jobs = 8, cookies = null, cookiesFromBrowse
 		tmp,
 		cookies: ck.cookies,
 		cookiesFromBrowser: ck.cookiesFromBrowser,
+		cookiesCopy: null,
+		cookiesSourceMtime: 0,
 		recognize: ocrPool(workers),
 		close: () => fs.rmSync(tmp, { recursive: true, force: true }),
 	};
 }
 
+/**
+ * Рабочая копия cookies-файла внутри tmp: yt-dlp перезаписывает файл из --cookies
+ * после каждого запуска, поэтому отдаём ему копию (обновляя её, если пользователь
+ * подложил свежий файл прямо во время прогона) — исходник на диске не портится.
+ */
+function workingCookiesFile(scanner) {
+	if (!scanner.cookies) return null;
+	try {
+		const mtime = fs.statSync(scanner.cookies).mtimeMs;
+		const copy = path.join(scanner.tmp, 'cookies.txt');
+		if (!scanner.cookiesCopy || mtime !== scanner.cookiesSourceMtime || !fs.existsSync(copy)) {
+			fs.copyFileSync(scanner.cookies, copy);
+			scanner.cookiesCopy = copy;
+			scanner.cookiesSourceMtime = mtime;
+		}
+		return copy;
+	} catch {
+		return scanner.cookies;
+	}
+}
+
 /** Получить прямой URL видеопотока 720p MP4 через yt-dlp -g. */
 async function resolveStreamUrl(videoId, scanner) {
-	const args = ['-f', FORMAT_SELECTOR, '-g', '--no-warnings', '--no-playlist'];
-	if (scanner.cookies) args.push('--cookies', scanner.cookies);
+	// Без --no-warnings: предупреждения идут в stderr (stdout с -g остаётся чистым URL),
+	// зато при отказе видно настоящую причину (сбой JS-солвера EJS, SABR и т. п.).
+	const args = ['-f', FORMAT_SELECTOR, '-g', '--no-playlist'];
+	const ckFile = workingCookiesFile(scanner);
+	if (ckFile) args.push('--cookies', ckFile);
 	else if (scanner.cookiesFromBrowser) args.push('--cookies-from-browser', scanner.cookiesFromBrowser);
 	args.push(`https://www.youtube.com/watch?v=${videoId}`);
 
@@ -159,17 +200,38 @@ async function resolveStreamUrl(videoId, scanner) {
 		if (!url) throw new Error('yt-dlp не вернул URL потока');
 		return url;
 	} catch (err) {
-		const msg = `${err.stderr || ''} ${err.message || ''}`.trim();
+		const stderr = String(err.stderr || '').trim();
+		const msg = `${stderr} ${err.message || ''}`.trim();
+		const rotated = /cookies are no longer valid|rotated in the browser/i.test(stderr);
+		const ckNote = scanner.cookies
+			? (rotated
+				? `cookies в ${path.basename(scanner.cookies)} ротированы браузером — экспортируйте из окна инкогнито и закройте его`
+				: `cookies в ${path.basename(scanner.cookies)} устарели или не авторизованы`)
+			: (scanner.cookiesFromBrowser ? `cookies из ${scanner.cookiesFromBrowser} не прошли проверку` : null);
 		if (/sign in to confirm your age|age[- ]restricted|inappropriate for some users/i.test(msg)) {
-			throw new AgeRestrictedError('видео 18+ (нужны cookies или Gemini)');
+			throw new AgeRestrictedError(ckNote ? `видео 18+ (${ckNote})` : 'видео 18+ (нужны cookies или Gemini)');
 		}
 		if (/sign in to confirm you.{0,5}re not a bot|confirm you.{0,5}re not a bot/i.test(msg)) {
-			throw new LocalBotCheckError('YouTube запросил проверку на бота (передайте --cookies-from-browser)');
+			throw new LocalBotCheckError(ckNote
+				? `YouTube запросил проверку на бота (${ckNote} — обновите их или передайте --cookies-from-browser)`
+				: 'YouTube запросил проверку на бота (передайте --cookies или --cookies-from-browser)');
+		}
+		if (/n challenge solving failed|Signature solving failed|addOnDisposeCallback|Only images are available for download/i.test(msg)) {
+			const detail = stderr.split(/\r?\n/).find(l => /addOnDisposeCallback|challenge solving failed|Only images are available/i.test(l))?.slice(0, 180) || '';
+			throw new LocalExtractorError(`yt-dlp не смог решить JS-челлендж YouTube (обновите yt-dlp / yt-dlp-ejs)${detail ? `: ${detail}` : ''}`);
 		}
 		if (/video unavailable|private video|has been removed|account associated|members-only|join this channel|premieres in/i.test(msg)) {
-			throw new LocalVideoGoneError(msg.split(/\r?\n/)[0].slice(0, 220));
+			const firstErr = stderr.split(/\r?\n/).find(l => /^ERROR:/i.test(l)) || msg.split(/\r?\n/)[0];
+			throw new LocalVideoGoneError(firstErr.slice(0, 220));
 		}
-		throw new Error(`yt-dlp: ${msg.split(/\r?\n/).slice(-1)[0]?.slice(0, 220) || err.message}`);
+		const errLine = stderr.split(/\r?\n/).find(l => /^ERROR:/i.test(l))
+			|| msg.split(/\r?\n/).filter(Boolean).slice(-1)[0]
+			|| err.message;
+		const wrapped = new Error(`yt-dlp: ${String(errLine || '').slice(0, 220)}`);
+		if (/please sign in|requested format is not available/i.test(msg)) {
+			wrapped.systemic = true;
+		}
+		throw wrapped;
 	}
 }
 
