@@ -38,7 +38,8 @@
 //   d1.js         заливка базы запросами через D1 REST, а не файлом
 //   drift.js      сверка: не разошлось ли лежащее наверху с тем, что база
 //                 считает отправленным
-//   hidden.js     список снятых с публикации паков — домой, для сборки
+//   hidden.js          список снятых с публикации паков — домой, для сборки
+//   community-stats.js сводка стримов и сообщества из D1 — домой, для /stats
 //   moves.js      триггеры журнала pack_moves: паки, ушедшие из выдачи
 //   rowhash.js    отпечаток строки — один на выгрузку и на сверку
 //   site.js       по какому адресу сайт открывается наверху
@@ -56,6 +57,7 @@ import { addMissingColumns } from './deploy/columns.js';
 import { forgetDrifted } from './deploy/drift.js';
 import { pullAuthorNames, pushAuthorNames } from './deploy/author-names.js';
 import { pullHiddenPacks } from './deploy/hidden.js';
+import { pullCommunityStats } from './deploy/community-stats.js';
 import { createMoveTriggers } from './deploy/moves.js';
 import { pingIndexNow } from './deploy/indexnow.js';
 import { recrawl } from './recrawl.js';
@@ -196,6 +198,12 @@ async function main() {
 	// (prebuilt.json, author-packs.txt, место автора в рейтинге) считает сборка,
 	// и снятые она считать не должна (см. openLibrary в scripts/build-web.js)
 	await pullHiddenPacks();
+
+	// Снимок стримов Twitch/YouTube и активности посетителей — для сборки /stats
+	// без единого чтения D1 в рантайме (см. scripts/deploy/community-stats.js).
+	if (!dbOnly) {
+		await pullCommunityStats();
+	}
 
 	// Статику собирает тот, у кого она есть. В репозитории её нет: наверх
 	// из Actions уезжает только база, а сайт — код страниц, стили и готовые
