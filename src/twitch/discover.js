@@ -219,7 +219,7 @@ export async function discover(o) {
 	const todo = [];
 	let probes = 0;
 	for (const item of allTodo) {
-		if (item.plan.mode === 'probe') {
+		if (item.plan.mode === 'probe' && !o.noProbeCap) {
 			if (probes >= MAX_PROBE_PER_RUN) { skipped.probeCap++; continue; }
 			probes++;
 		}

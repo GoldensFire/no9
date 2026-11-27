@@ -6,7 +6,7 @@
 
 import { gqlBatch } from '../twitch/twitch.js';
 import { MAX_TRIES } from '../twitch/store.js';
-import { apiMode, channelUploads, parseYoutubeChannelRef, resolveChannels, searchVideos, videosById } from './api.js';
+import { apiMode, channelUploads, isDataQuotaHit, parseYoutubeChannelRef, resolveChannels, searchVideos, videosById } from './api.js';
 import { shouldSkipPreview, shouldSkipVideo } from './plan.js';
 
 /** 11 проверенных запросов (9 базовых из youtube-gemini-plan.md + 2 высокоточных RU-запроса). */
@@ -22,6 +22,32 @@ export const SEARCH_QUERIES = [
 	'своя игра twitch',
 	'своя игра твич',
 	'своя игра солянка',
+];
+
+/** Дополнительные запросы для глубоких волн бесконечного обхода (wave >= 2, через бесплатный InnerTube). */
+export const DEEP_SEARCH_QUERIES = [
+	'своя игра',
+	'сишечка',
+	'сисигейм',
+	'си гаме',
+	'свояк игра',
+	'своячок',
+	'сигейм пак',
+	'sigame pack',
+	'сионлайн',
+	'si online',
+	'своя игра аниме',
+	'своя игра игры',
+	'своя игра музыка',
+	'своя игра кино',
+	'своя игра мемы',
+	'своя игра с друзьями',
+	'своя игра 2026',
+	'своя игра 2025',
+	'своя игра 2024',
+	'своя игра 2023',
+	'своя игра 2022',
+	'своя игра 2021',
 ];
 
 /** Вытащить все http(s)-ссылки и голые youtube.com/... из свободного текста (описание канала или панели Twitch). */
@@ -201,20 +227,31 @@ export async function discover({
 	channelYield = new Map(),
 	rescan = false,
 	preferInnertubeSearch = false,
+	wave = 1,
+	deep = false,
+	sessionSkipped = null,
 } = {}) {
 	const now = Date.now();
-	const publishedAfter = backfill || days <= 0 ? 0 : now - days * 864e5;
-	const channelCutoff = (!backfill && publishedAfter > 0) ? now - Math.max(days, 14) * 864e5 : 0;
+	const waveDepth = Math.max(1, Number(wave) || 1);
+	const publishedAfter = backfill || deep || days <= 0 ? 0 : now - days * 864e5;
+	const channelCutoff = (!backfill && !deep && publishedAfter > 0) ? now - Math.max(days, 14) * 864e5 : 0;
 	const baseMode = apiMode();
-	const useInnertubeSearch = preferInnertubeSearch || baseMode !== 'data-v3';
+	const useInnertubeSearch = preferInnertubeSearch || baseMode !== 'data-v3' || isDataQuotaHit();
 	// В Data API v3 страница поиска = 50 видео (и жёсткий лимит 100 вызовов/сут),
 	// а в InnerTube страница = ~20 видео и квоты нет: в локальном режиме сразу
-	// ищем через InnerTube (8 + 6 стр.), чтобы не сжигать суточную квоту ключа для облака,
-	// а в облачном режиме при 429 автоматически переключаемся на InnerTube.
-	const itDatePages = backfill ? 8 : 1;
-	const itRelPages = backfill ? 6 : 0;
+	// ищем через InnerTube (8 + 6 стр. на волне 1 и глубже на следующих волнах),
+	// а в облачном режиме при 403/429 автоматически переключаемся на InnerTube.
+	const itDatePages = (backfill || deep)
+		? (waveDepth === 1 ? 8 : Math.min(25, 8 + waveDepth * 5))
+		: 1;
+	const itRelPages = (backfill || deep)
+		? (waveDepth === 1 ? 6 : Math.min(20, 6 + waveDepth * 4))
+		: 0;
 	const datePages = useInnertubeSearch ? itDatePages : (backfill ? 3 : 1);
 	const relevancePages = useInnertubeSearch ? itRelPages : (backfill ? 2 : 0);
+	const queries = (deep && waveDepth >= 2 && useInnertubeSearch)
+		? [...SEARCH_QUERIES, ...DEEP_SEARCH_QUERIES]
+		: SEARCH_QUERIES;
 
 	const stats = {
 		mode: baseMode === 'data-v3' && useInnertubeSearch ? 'data-v3 + innertube-search' : baseMode,
@@ -265,13 +302,13 @@ export async function discover({
 		stats.mode = 'data-v3 (поиск → innertube по 429)';
 		console.warn('⚠️ YouTube Data API v3 search.list упёрся в суточную квоту (429) — поиск переключён на InnerTube');
 	};
-	for (const q of SEARCH_QUERIES) {
+	for (const q of queries) {
 		try {
 			const res = await searchVideos(q, {
 				publishedAfter,
 				maxPages: datePages,
 				innertubeMaxPages: itDatePages,
-				days: backfill ? 0 : days,
+				days: (backfill || deep) ? 0 : days,
 				order: 'date',
 				useInnertube: useInnertubeSearch,
 			});
@@ -307,10 +344,11 @@ export async function discover({
 		if (y.scanned >= 5 && y.withPacks === 0) return 0;
 		return 1;
 	};
-	const channelPool = [...channels]
+	const sortedChannels = [...channels]
 		.filter(c => (c.sigame_videos || 0) > 0 || c.source === 'twitch' || c.source === 'manual')
-		.sort((a, b) => channelRank(b) - channelRank(a) || (a.last_checked_at || 0) - (b.last_checked_at || 0))
-		.slice(0, backfill ? 250 : 120);
+		.sort((a, b) => channelRank(b) - channelRank(a) || (a.last_checked_at || 0) - (b.last_checked_at || 0));
+	// В глубоком/бесконечном режиме обходим все известные каналы, не отрезая хвост после 250
+	const channelPool = deep ? sortedChannels : sortedChannels.slice(0, backfill ? 250 : 120);
 
 	const checkedChannelIds = [];
 	const CHANNEL_CONCURRENCY = 5;
@@ -319,14 +357,14 @@ export async function discover({
 		while (chCursor < channelPool.length) {
 			const ch = channelPool[chCursor++];
 			try {
-				// Глубина обхода зависит от отдачи канала:
-				//   - давал паки из нашей базы (withPacks > 0) → до 500 видео в backfill (Архив Графона, ALEX TEM GAMER, TWOLFACE);
-				//   - «сухой» канал (0 паков на ≥5 просмотренных видео, вроде шоу по Lineage 2) → не глубже 30;
-				//   - неразведанный канал (включая Twitch-мост) → до 150 видео в backfill.
+				// Глубина обхода зависит от отдачи канала и номера волны:
+				//   - давал паки из нашей базы (withPacks > 0) → 500 на волне 1 и до 5000 на глубоких волнах;
+				//   - «сухой» канал (0 паков на ≥5 просмотренных видео) → 30..120;
+				//   - неразведанный канал (включая Twitch-мост) → 150..1000.
 				const y = yieldOf(ch.channel_id);
-				const depth = !backfill ? 30
-					: y.withPacks > 0 ? 500
-					: (y.scanned >= 5 ? 30 : 150);
+				const depth = (!backfill && !deep) ? 30
+					: y.withPacks > 0 ? Math.min(5000, 500 * waveDepth)
+					: (y.scanned >= 5 ? Math.min(120, 30 * waveDepth) : Math.min(1000, 150 * waveDepth));
 				const res = await channelUploads(ch.channel_id, {
 					maxResults: depth,
 					channelTitle: ch.title || '',
@@ -363,6 +401,10 @@ export async function discover({
 	// чтобы не гонять по 15 000 лишних запросов videos.list / InnerTube player
 	const toFetch = [];
 	for (const [id, entry] of candidates) {
+		if (sessionSkipped?.has(id)) {
+			skipped.seen++;
+			continue;
+		}
 		const prev = known.get(id);
 		if (prev && !rescan) {
 			if (prev.status === 'done' || prev.status === 'gone' || prev.status === 'restricted') {
@@ -391,6 +433,34 @@ export async function discover({
 
 	// 3. Метаданные пачкой (videos.list / player) — только для прошедших предфильтр кандидатов
 	const { videos, missing, botChecked = 0 } = await videosById(toFetch);
+	if (isDataQuotaHit() && !stats.mode.includes('квота')) {
+		stats.mode = 'innertube (квота data-v3 исчерпана)';
+	}
+	// В локальном режиме, если InnerTube player вернул botCheck/сбой, но превью уже содержит
+	// название и длину >= 15 мин, всё равно пускаем видео в yt-dlp (он добудет поток сам)
+	if (preferInnertubeSearch) {
+		const missingSet = new Set(missing);
+		for (const id of toFetch) {
+			if (videos.has(id) || missingSet.has(id)) continue;
+			const p = candidates.get(id)?.preview;
+			if (p && p.title && !p.isLive && (p.length || 0) >= 900) {
+				videos.set(id, {
+					id,
+					vodId: `yt:${id}`,
+					channelId: p.channelId || '',
+					channelTitle: p.channelTitle || '',
+					title: p.title,
+					description: '',
+					publishedAt: p.publishedAt || 0,
+					length: p.length,
+					views: null,
+					embeddable: true,
+					ageRestricted: false,
+					isLive: false,
+				});
+			}
+		}
+	}
 	stats.videosFetched = videos.size;
 	skipped.missing = missing.length;
 	if (botChecked > 0) {

@@ -99,23 +99,39 @@ function readToken() {
  * Ошибки Вебмастера приезжают телом, а не кодом: HTTP 400 с {"error_message":…}
  * говорит куда больше, чем «400», — поэтому наружу отдаётся сообщение, а не код.
  */
-async function ask(token, route, init = {}) {
-	const response = await fetch(`${WEBMASTER_API}${route}`, {
-		...init,
-		headers: {
-			Authorization: `OAuth ${token}`,
-			...(init.body ? { 'Content-Type': 'application/json' } : {}),
-			...init.headers,
-		},
-	});
+async function ask(token, route, init = {}, tries = 3) {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			const response = await fetch(`${WEBMASTER_API}${route}`, {
+				...init,
+				signal: AbortSignal.timeout(25_000),
+				headers: {
+					Authorization: `OAuth ${token}`,
+					...(init.body ? { 'Content-Type': 'application/json' } : {}),
+					...init.headers,
+				},
+			});
 
-	const body = await response.json().catch(() => null);
+			const body = await response.json().catch(() => null);
 
-	if (!response.ok) {
-		throw new Error(body?.error_message ?? `HTTP ${response.status}`);
+			if (!response.ok) {
+				const retryable = response.status >= 500 || response.status === 429;
+				if (retryable && attempt < tries) {
+					await wait(2000 * attempt);
+					continue;
+				}
+				const err = new Error(body?.error_message ?? `HTTP ${response.status}`);
+				err.status = response.status;
+				throw err;
+			}
+
+			return body;
+		} catch (error) {
+			if (error.status && error.status < 500 && error.status !== 429) throw error;
+			if (attempt >= tries) throw error;
+			await wait(2000 * attempt);
+		}
 	}
-
-	return body;
 }
 
 /**
@@ -468,12 +484,14 @@ export async function recrawl() {
 
 		let sent = 0;
 		let failed = 0;
+		let consecutiveServerErrors = 0;
 
 		for (const item of today) {
 			try {
 				await submit(token, user, host, item.url);
 				remember.run(item.url, item.stamp, Date.now());
 				sent++;
+				consecutiveServerErrors = 0;
 			} catch (error) {
 				// Квота кончилась посреди отправки — это не ошибка, а конец дня:
 				// остальное уедет завтра, и запомнили мы ровно то, что ушло
@@ -487,6 +505,11 @@ export async function recrawl() {
 				// Одна отказавшая страница не повод бросать остальные сто сорок
 				if (failed <= 3) {
 					console.log(`  ${item.url} — ${error.message}`);
+				}
+
+				if ((error.status >= 500 || !error.status) && ++consecutiveServerErrors >= 10) {
+					console.log(`  API Вебмастера ответил ошибкой ${consecutiveServerErrors} раз подряд (${error.message}) — останавливаю отправку до следующего раза.`);
+					break;
 				}
 			}
 

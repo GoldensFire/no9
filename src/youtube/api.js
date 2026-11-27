@@ -26,6 +26,22 @@ const YT_HEADERS = {
 
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 let dataSearchQuotaHit = false;
+let dataQuotaHit = false;
+let dataQuotaLogged = false;
+
+function markDataQuotaHit(where) {
+	dataQuotaHit = true;
+	dataSearchQuotaHit = true;
+	if (!dataQuotaLogged) {
+		dataQuotaLogged = true;
+		console.warn(`⚠️ YouTube Data API v3 упёрся в суточную квоту (${where}) — переключаюсь на InnerTube`);
+	}
+}
+
+/** Переключился ли клиент на InnerTube из-за исчерпания квоты Data API v3. */
+export function isDataQuotaHit() {
+	return dataQuotaHit || dataSearchQuotaHit;
+}
 
 function decodeHtml(s) {
 	return String(s || '')
@@ -290,7 +306,7 @@ export async function searchVideos(query, {
 } = {}) {
 	const itPages = innertubeMaxPages ?? maxPages;
 
-	if (!useInnertube && config.youtubeApiKey && !dataSearchQuotaHit) {
+	if (!useInnertube && config.youtubeApiKey && !dataSearchQuotaHit && !dataQuotaHit) {
 		const ids = [];
 		const items = [];
 		const seen = new Set();
@@ -336,6 +352,7 @@ export async function searchVideos(query, {
 		} catch (e) {
 			if (!e.quotaExceeded && e.status !== 429) throw e;
 			dataSearchQuotaHit = true;
+			if (e.quotaExceeded) markDataQuotaHit('search.list');
 			const fb = await searchVideosInnertube(query, { maxPages: itPages, days, order, ids, items, seen });
 			return { ids: fb.ids, items: fb.items, calls: calls + fb.calls, mode: 'innertube', quotaFallback: true };
 		}
@@ -345,53 +362,21 @@ export async function searchVideos(query, {
 	return {
 		...res,
 		mode: 'innertube',
-		quotaFallback: Boolean(!useInnertube && config.youtubeApiKey && dataSearchQuotaHit),
+		quotaFallback: Boolean(!useInnertube && config.youtubeApiKey && (dataSearchQuotaHit || dataQuotaHit)),
 	};
 }
 
-/**
- * Подробности видео по списку ID. Удалённые/недоступные отсутствуют в Map (или null).
- *
- * @param {string[]} ids
- * @returns {Promise<{ videos: Map<string, object>, missing: string[], calls: number }>}
- */
-export async function videosById(ids) {
-	const unique = [...new Set(ids.map(cleanVideoId).filter(Boolean))];
-	const videos = new Map();
-	const missing = [];
+async function videosByIdInnertube(ids, { videos, missing }) {
 	let calls = 0;
 	let botChecked = 0;
-
-	if (!unique.length) return { videos, missing, calls, botChecked };
-
-	if (config.youtubeApiKey) {
-		for (let i = 0; i < unique.length; i += 50) {
-			const part = unique.slice(i, i + 50);
-			const data = await dataGet('videos', {
-				part: 'snippet,contentDetails,statistics,status,liveStreamingDetails',
-				id: part.join(','),
-				hl: 'ru',
-			});
-			calls++;
-			const got = new Set();
-			for (const item of data.items || []) {
-				const v = normalizeDataVideo(item);
-				if (v) {
-					videos.set(v.id, v);
-					got.add(v.id);
-				}
-			}
-			for (const id of part) if (!got.has(id)) missing.push(id);
-		}
-		return { videos, missing, calls, botChecked };
-	}
+	if (!ids.length) return { calls, botChecked };
 
 	// InnerTube player: параллельно по 6 запросов (каждый ~150 мс)
 	const CONCURRENCY = 6;
 	let cursor = 0;
 	const worker = async () => {
-		while (cursor < unique.length) {
-			const id = unique[cursor++];
+		while (cursor < ids.length) {
+			const id = ids[cursor++];
 			try {
 				const data = await innertubePost('player', { videoId: id });
 				calls++;
@@ -409,7 +394,64 @@ export async function videosById(ids) {
 			}
 		}
 	};
-	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, unique.length) }, worker));
+	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
+	return { calls, botChecked };
+}
+
+/**
+ * Подробности видео по списку ID. Удалённые/недоступные отсутствуют в Map (или null).
+ * При исчерпании квоты Data API v3 (403/429) автоматически добирает остаток через InnerTube player.
+ *
+ * @param {string[]} ids
+ * @returns {Promise<{ videos: Map<string, object>, missing: string[], calls: number, botChecked: number }>}
+ */
+export async function videosById(ids) {
+	const unique = [...new Set(ids.map(cleanVideoId).filter(Boolean))];
+	const videos = new Map();
+	const missing = [];
+	let calls = 0;
+	let botChecked = 0;
+
+	if (!unique.length) return { videos, missing, calls, botChecked };
+
+	let fallbackIds = unique;
+	if (config.youtubeApiKey && !dataQuotaHit) {
+		fallbackIds = [];
+		for (let i = 0; i < unique.length; i += 50) {
+			const part = unique.slice(i, i + 50);
+			try {
+				const data = await dataGet('videos', {
+					part: 'snippet,contentDetails,statistics,status,liveStreamingDetails',
+					id: part.join(','),
+					hl: 'ru',
+				});
+				calls++;
+				const got = new Set();
+				for (const item of data.items || []) {
+					const v = normalizeDataVideo(item);
+					if (v) {
+						videos.set(v.id, v);
+						got.add(v.id);
+					}
+				}
+				for (const id of part) if (!got.has(id)) missing.push(id);
+			} catch (e) {
+				if (e.quotaExceeded || e.status === 429) {
+					markDataQuotaHit('videos.list');
+					fallbackIds = unique.slice(i);
+					break;
+				}
+				throw e;
+			}
+		}
+	}
+
+	if (fallbackIds.length) {
+		const fb = await videosByIdInnertube(fallbackIds, { videos, missing });
+		calls += fb.calls;
+		botChecked += fb.botChecked;
+	}
+
 	return { videos, missing, calls, botChecked };
 }
 
@@ -450,77 +492,10 @@ function extractGridVideos(gridItems, channelId = '', channelTitle = '') {
 	return out;
 }
 
-/**
- * Последние загрузки канала (через UU-плейлист в Data API v3 с пагинацией
- * или вкладки Видео+Трансляции в InnerTube с continuation).
- * Возвращает ids и превью items (title, publishedAt, length, isLive) для предфильтрации.
- *
- * @param {string} channelId UC...
- * @param {{ maxResults?: number, channelTitle?: string, publishedAfter?: number }} [opts]
- * @returns {Promise<{ ids: string[], items: Array<object>, calls: number }>}
- */
-export async function channelUploads(channelId, { maxResults = 25, channelTitle = '', publishedAfter = 0 } = {}) {
-	if (!/^UC[\w-]{20,}$/.test(String(channelId || ''))) return { ids: [], items: [], calls: 0 };
-
-	if (config.youtubeApiKey) {
-		const playlistId = `UU${channelId.slice(2)}`;
-		const ids = [];
-		const items = [];
-		const seen = new Set();
-		let pageToken = null;
-		let calls = 0;
-		const maxPages = Math.max(1, Math.ceil(maxResults / 50));
-		for (let page = 0; page < maxPages && ids.length < maxResults; page++) {
-			try {
-				const params = {
-					// part=snippet,contentDetails стоит ту же 1 единицу, что и part=contentDetails,
-					// но сразу отдаёт title и publishedAt для отсева шума ДО videos.list
-					part: 'snippet,contentDetails',
-					playlistId,
-					maxResults: String(Math.min(50, maxResults - ids.length)),
-				};
-				if (pageToken) params.pageToken = pageToken;
-				const data = await dataGet('playlistItems', params);
-				calls++;
-				let hitOld = false;
-				for (const it of data.items || []) {
-					const id = it?.contentDetails?.videoId || it?.snippet?.resourceId?.videoId;
-					if (!id || seen.has(id)) continue;
-					const sn = it.snippet || {};
-					const publishedAt = Date.parse(it.contentDetails?.videoPublishedAt || sn.publishedAt) || 0;
-					if (publishedAfter > 0 && publishedAt > 0 && publishedAt < publishedAfter) {
-						hitOld = true;
-						continue;
-					}
-					seen.add(id);
-					ids.push(String(id));
-					items.push({
-						id: String(id),
-						channelId,
-						channelTitle: sn.channelTitle || channelTitle,
-						title: sn.title || '',
-						publishedAt,
-						length: 0,
-						isLive: false,
-					});
-				}
-				pageToken = data.nextPageToken || null;
-				if (!pageToken || hitOld) break;
-			} catch (e) {
-				if (e.status === 404) return { ids, items, calls: calls + 1 };
-				if (ids.length) break;
-				throw e;
-			}
-		}
-		return { ids, items, calls };
-	}
-
+async function channelUploadsInnertube(channelId, { maxResults = 25, channelTitle = '', seen = new Set(), ids = [], items = [] } = {}) {
 	// InnerTube: вкладка «Видео» (EgZ2aWRlb3PyBgQKAjoA) и вкладка «Трансляции» (EgdzdHJlYW1z8gYECgJ6AA==).
 	// Каждой вкладке даём собственный лимит (до maxResults), чтобы канал с 500 видео
 	// не обрезал вкладку «Трансляции», где и лежат записи стримов SIGame.
-	const seen = new Set();
-	const ids = [];
-	const items = [];
 	let calls = 0;
 	const maxTabPages = Math.max(1, Math.ceil(maxResults / 30));
 	for (const params of ['EgZ2aWRlb3PyBgQKAjoA', 'EgdzdHJlYW1z8gYECgJ6AA==']) {
@@ -559,6 +534,83 @@ export async function channelUploads(channelId, { maxResults = 25, channelTitle 
 }
 
 /**
+ * Последние загрузки канала (через UU-плейлист в Data API v3 с пагинацией
+ * или вкладки Видео+Трансляции в InnerTube с continuation).
+ * При исчерпании квоты Data API v3 автоматически переключается на InnerTube.
+ * Возвращает ids и превью items (title, publishedAt, length, isLive) для предфильтрации.
+ *
+ * @param {string} channelId UC...
+ * @param {{ maxResults?: number, channelTitle?: string, publishedAfter?: number }} [opts]
+ * @returns {Promise<{ ids: string[], items: Array<object>, calls: number }>}
+ */
+export async function channelUploads(channelId, { maxResults = 25, channelTitle = '', publishedAfter = 0 } = {}) {
+	if (!/^UC[\w-]{20,}$/.test(String(channelId || ''))) return { ids: [], items: [], calls: 0 };
+
+	const ids = [];
+	const items = [];
+	const seen = new Set();
+	let calls = 0;
+
+	if (config.youtubeApiKey && !dataQuotaHit) {
+		const playlistId = `UU${channelId.slice(2)}`;
+		let pageToken = null;
+		const maxPages = Math.max(1, Math.ceil(maxResults / 50));
+		let hitQuota = false;
+		for (let page = 0; page < maxPages && ids.length < maxResults; page++) {
+			try {
+				const params = {
+					// part=snippet,contentDetails стоит ту же 1 единицу, что и part=contentDetails,
+					// но сразу отдаёт title и publishedAt для отсева шума ДО videos.list
+					part: 'snippet,contentDetails',
+					playlistId,
+					maxResults: String(Math.min(50, maxResults - ids.length)),
+				};
+				if (pageToken) params.pageToken = pageToken;
+				const data = await dataGet('playlistItems', params);
+				calls++;
+				let hitOld = false;
+				for (const it of data.items || []) {
+					const id = it?.contentDetails?.videoId || it?.snippet?.resourceId?.videoId;
+					if (!id || seen.has(id)) continue;
+					const sn = it.snippet || {};
+					const publishedAt = Date.parse(it.contentDetails?.videoPublishedAt || sn.publishedAt) || 0;
+					if (publishedAfter > 0 && publishedAt > 0 && publishedAt < publishedAfter) {
+						hitOld = true;
+						continue;
+					}
+					seen.add(id);
+					ids.push(String(id));
+					items.push({
+						id: String(id),
+						channelId,
+						channelTitle: sn.channelTitle || channelTitle,
+						title: sn.title || '',
+						publishedAt,
+						length: 0,
+						isLive: false,
+					});
+				}
+				pageToken = data.nextPageToken || null;
+				if (!pageToken || hitOld) break;
+			} catch (e) {
+				if (e.status === 404) return { ids, items, calls: calls + 1 };
+				if (e.quotaExceeded || e.status === 429) {
+					markDataQuotaHit('playlistItems.list');
+					hitQuota = true;
+					break;
+				}
+				if (ids.length) break;
+				throw e;
+			}
+		}
+		if (!hitQuota) return { ids, items, calls };
+	}
+
+	const fb = await channelUploadsInnertube(channelId, { maxResults, channelTitle, seen, ids, items });
+	return { ids: fb.ids, items: fb.items, calls: calls + fb.calls };
+}
+
+/**
  * Преобразовать ссылки/хэндлы каналов в { channelId, title, handle }.
  *
  * @param {Array<{ kind: 'id'|'handle'|'url', value: string, twitchLogin?: string }>} refs
@@ -568,55 +620,76 @@ export async function resolveChannels(refs) {
 	const out = [];
 	const seen = new Set();
 
+	const resolveByInnertube = async (ref, currentHandle) => {
+		const url = ref.kind === 'handle'
+			? `https://www.youtube.com/${ref.value}`
+			: (ref.kind === 'user' ? `https://www.youtube.com/user/${ref.value}` : ref.value);
+		const data = await innertubePost('navigation/resolve_url', { url });
+		const bid = data?.endpoint?.browseEndpoint?.browseId;
+		if (!bid || !/^UC[\w-]{20,}$/.test(bid)) return null;
+		const canonical = data?.endpoint?.browseEndpoint?.canonicalBaseUrl || '';
+		const handle = canonical.startsWith('/@') ? canonical.slice(1) : currentHandle;
+		return { channelId: bid, title: '', handle };
+	};
+
 	for (const ref of refs) {
 		if (!ref?.value) continue;
 		try {
 			let channelId = null;
 			let title = '';
 			let handle = ref.kind === 'handle' ? ref.value : null;
+			const useData = Boolean(config.youtubeApiKey && !dataQuotaHit);
 
 			if (ref.kind === 'id') {
 				channelId = ref.value;
-				if (config.youtubeApiKey) {
-					const data = await dataGet('channels', { part: 'snippet', id: channelId });
-					const item = data.items?.[0];
-					if (item) {
-						title = item.snippet?.title || '';
-						handle = item.snippet?.customUrl || handle;
-					}
-				}
-			} else if (config.youtubeApiKey && ref.kind === 'handle') {
-				const data = await dataGet('channels', { part: 'snippet', forHandle: ref.value.replace(/^@/, '') });
-				const item = data.items?.[0];
-				if (item?.id) {
-					channelId = String(item.id);
-					title = item.snippet?.title || '';
-					handle = item.snippet?.customUrl || ref.value;
-				}
-			} else if (config.youtubeApiKey && ref.kind === 'user') {
-				const data = await dataGet('channels', { part: 'snippet', forUsername: ref.value });
-				const item = data.items?.[0];
-				if (item?.id) {
-					channelId = String(item.id);
-					title = item.snippet?.title || '';
-					handle = item.snippet?.customUrl || handle;
-				}
-			} else {
-				const url = ref.kind === 'handle'
-					? `https://www.youtube.com/${ref.value}`
-					: (ref.kind === 'user' ? `https://www.youtube.com/user/${ref.value}` : ref.value);
-				const data = await innertubePost('navigation/resolve_url', { url });
-				const bid = data?.endpoint?.browseEndpoint?.browseId;
-				if (bid && /^UC[\w-]{20,}$/.test(bid)) {
-					channelId = bid;
-					const canonical = data?.endpoint?.browseEndpoint?.canonicalBaseUrl || '';
-					if (canonical.startsWith('/@')) handle = canonical.slice(1);
-					if (config.youtubeApiKey) {
-						const ch = await dataGet('channels', { part: 'snippet', id: channelId });
-						const item = ch.items?.[0];
+				if (useData) {
+					try {
+						const data = await dataGet('channels', { part: 'snippet', id: channelId });
+						const item = data.items?.[0];
 						if (item) {
 							title = item.snippet?.title || '';
 							handle = item.snippet?.customUrl || handle;
+						}
+					} catch (e) {
+						if (e.quotaExceeded || e.status === 429) markDataQuotaHit('channels.list');
+						else throw e;
+					}
+				}
+			} else if (useData && (ref.kind === 'handle' || ref.kind === 'user')) {
+				try {
+					const params = ref.kind === 'handle'
+						? { part: 'snippet', forHandle: ref.value.replace(/^@/, '') }
+						: { part: 'snippet', forUsername: ref.value };
+					const data = await dataGet('channels', params);
+					const item = data.items?.[0];
+					if (item?.id) {
+						channelId = String(item.id);
+						title = item.snippet?.title || '';
+						handle = item.snippet?.customUrl || handle;
+					}
+				} catch (e) {
+					if (e.quotaExceeded || e.status === 429) {
+						markDataQuotaHit('channels.list');
+						const fb = await resolveByInnertube(ref, handle);
+						if (fb) ({ channelId, title, handle } = fb);
+					} else {
+						throw e;
+					}
+				}
+			} else {
+				const fb = await resolveByInnertube(ref, handle);
+				if (fb) {
+					({ channelId, title, handle } = fb);
+					if (config.youtubeApiKey && !dataQuotaHit) {
+						try {
+							const ch = await dataGet('channels', { part: 'snippet', id: channelId });
+							const item = ch.items?.[0];
+							if (item) {
+								title = item.snippet?.title || '';
+								handle = item.snippet?.customUrl || handle;
+							}
+						} catch (e) {
+							if (e.quotaExceeded || e.status === 429) markDataQuotaHit('channels.list');
 						}
 					}
 				}

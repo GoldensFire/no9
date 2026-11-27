@@ -570,3 +570,37 @@ export const OFFSITE_SHARE_SQL = `CASE
 	WHEN p.media_offsite IS NOT NULL AND COALESCE(p.media_own, 0) + p.media_offsite > 0
 	THEN p.media_offsite * 1.0 / (COALESCE(p.media_own, 0) + p.media_offsite)
 END`;
+
+/**
+ * Доля HTML-контента среди всех элементов вопросов пака (0..1).
+ *
+ * По ней сортируется выдача при поиске «HTML»: в первую очередь идут паки,
+ * у которых процент HTML-контента выше (тот же знаменатель, что у полоски
+ * состава на карточке — см. createShares в web/card-shares.js).
+ */
+export const HTML_SHARE_SQL = `(COALESCE(json_extract(p.content_stat, '$.html'), 0) * 1.0 / MAX(
+	COALESCE(json_extract(p.content_stat, '$.text'), 0)
+	+ COALESCE(json_extract(p.content_stat, '$.image'), 0)
+	+ COALESCE(json_extract(p.content_stat, '$.audio'), 0)
+	+ COALESCE(json_extract(p.content_stat, '$.video'), 0)
+	+ COALESCE(json_extract(p.content_stat, '$.html'), 0),
+	1
+))`;
+
+/**
+ * Случайный порядок выдачи по зерну (seed): одинаковый на всех страницах
+ * одного просмотра, чтобы при листании не было повторов, и новый после
+ * нажатия «Перемешать».
+ *
+ * Считается целой арифметикой SQLite без переполнения 64-битного знакового:
+ * seed приводится к 1..2147483647, оба множителя укладываются в 2^31 × 2.3e9 < 2^63.
+ * Общее с Worker (cf/src/library/packs.js): порядок совпадает на обеих половинах.
+ */
+export function randomOrderSql(rawSeed) {
+	const parsed = Math.trunc(Number(rawSeed));
+	const seed = Number.isFinite(parsed) && parsed > 0
+		? (parsed % 2147483647) || 1
+		: Math.floor(Math.random() * 2147483646) + 1;
+
+	return `((((p.id + ${seed}) * 2654435761) & 2147483647) * 2246822519) & 2147483647`;
+}

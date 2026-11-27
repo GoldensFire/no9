@@ -58,24 +58,31 @@ export async function gql(query, variables = {}) {
  * Отказы IntegrityCheckFailed не повторяются (с этого IP они детерминированы),
  * а частичный ответ data при них сохраняется.
  */
-export async function gqlBatch(items) {
+export async function gqlBatch(items, { chunkSize = 30 } = {}) {
 	const out = new Array(items.length).fill(null);
 	let integrityErrors = 0;
+	let momentsErrors = 0;
 
 	const isIntegrityOnly = errors => Array.isArray(errors) && errors.length > 0
 		&& errors.every(e => e?.extensions?.code === 'IntegrityCheckFailed' || /failed integrity check/i.test(e?.message || ''));
 
-	const runChunks = async (indices, chunkSize) => {
+	// На отдельных старых VOD Twitch часто отдаёт service error на подзапросе глав (moments),
+	// при этом весь список видео канала (data) приходит целиком. Повторять весь канал 3 раза из-за
+	// одного битого moments только перегружает бэкенд и валит соседние каналы.
+	const isMomentsOnly = errors => Array.isArray(errors) && errors.length > 0
+		&& errors.every(e => Array.isArray(e?.path) && e.path[e.path.length - 1] === 'moments');
+
+	const runChunks = async (indices, size) => {
 		const failed = [];
-		for (let i = 0; i < indices.length; i += chunkSize) {
+		for (let i = 0; i < indices.length; i += size) {
 			if (i > 0) await new Promise(res => setTimeout(res, 250));
-			const idxPart = indices.slice(i, i + chunkSize);
+			const idxPart = indices.slice(i, i + size);
 			const part = idxPart.map(idx => items[idx]);
 			let res;
 			try {
 				res = await post(part);
 			} catch (e) {
-				if (chunkSize > 1) {
+				if (size > 1) {
 					failed.push(...idxPart);
 					continue;
 				}
@@ -83,7 +90,7 @@ export async function gqlBatch(items) {
 				continue;
 			}
 			if (!Array.isArray(res) || res.length !== idxPart.length) {
-				if (chunkSize > 1) {
+				if (size > 1) {
 					failed.push(...idxPart);
 					continue;
 				}
@@ -97,9 +104,14 @@ export async function gqlBatch(items) {
 					out[idxPart[k]] = r.data ?? null;
 					continue;
 				}
+				if (r && r.data && r.errors?.length && isMomentsOnly(r.errors)) {
+					momentsErrors++;
+					out[idxPart[k]] = r.data;
+					continue;
+				}
 				if (!r || r.errors?.length || r.data === undefined) {
 					failed.push(idxPart[k]);
-					if (chunkSize === 1) {
+					if (size === 1) {
 						const msg = r?.errors ? JSON.stringify(r.errors).slice(0, 200) : 'пустой ответ';
 						console.warn(`GQL item #${idxPart[k]} error after retries: ${msg}`);
 						out[idxPart[k]] = r?.data ?? null;
@@ -113,12 +125,15 @@ export async function gqlBatch(items) {
 	};
 
 	const allIdx = items.map((_, i) => i);
-	let failed = await runChunks(allIdx, 30);
+	let failed = await runChunks(allIdx, chunkSize);
 	if (integrityErrors) {
 		console.warn(`GQL batch: ${integrityErrors} отказов IntegrityCheckFailed (часть полей закрыта Twitch с этого IP, повторы пропущены)`);
 	}
-	if (failed.length) {
-		console.warn(`GQL batch: ${failed.length} сбоев в пачках по 30 — повторяю по 5`);
+	if (momentsErrors) {
+		console.warn(`GQL batch: ${momentsErrors} частичных отказов moments (список видео получен, повторы пропущены)`);
+	}
+	if (failed.length && chunkSize > 5) {
+		console.warn(`GQL batch: ${failed.length} сбоев в пачках по ${chunkSize} — повторяю по 5`);
 		await new Promise(res => setTimeout(res, 1000));
 		failed = await runChunks(failed, 5);
 	}
@@ -179,7 +194,7 @@ export async function channelVideos(logins) {
 			uploads: videos(first:10, type:UPLOAD, sort:TIME){ edges{ node{ ${VIDEO} } } }
 		} }`,
 		variables: { l: l },
-	})));
+	})), { chunkSize: 15 });
 	const out = [];
 	for (const d of res) {
 		const u = d?.user;
